@@ -27,7 +27,10 @@ from airsenal.scripts.fill_predictedscore_table import (
     get_top_predicted_points,
     make_predictedscore_table,
 )
-from airsenal.scripts.fill_transfersuggestion_table import run_optimization
+from airsenal.scripts.fill_transfersuggestion_table import (
+    CHIP_STRATEGIES,
+    run_optimization,
+)
 from airsenal.scripts.make_transfers import make_transfers
 from airsenal.scripts.save_expected_absences import main as save_expected_absences
 from airsenal.scripts.set_lineup import set_lineup
@@ -86,6 +89,21 @@ from airsenal.scripts.update_db import update_db
     type=int,
     help="Play bench_boost in the specified week. Choose 0 for 'any week'.",
     default=-1,
+)
+@click.option(
+    "--chip_strategy",
+    type=click.Choice(CHIP_STRATEGIES),
+    default="off",
+    help=(
+        "How to decide when to play chips, when none of the --*_week "
+        "options above have been set (an explicit --*_week option always "
+        "overrides this). 'off' (default): never play a chip, identical "
+        "to today's behaviour. 'manual': same as 'off' - chips are only "
+        "played via the --*_week options. 'auto': use "
+        "airsenal.framework.chip_timing.recommend_chip_timing to decide "
+        "whether to play each available chip within the optimisation "
+        "horizon."
+    ),
 )
 @click.option(
     "--n_previous",
@@ -148,6 +166,7 @@ def run_pipeline(
     free_hit_week: int,
     triple_captain_week: int,
     bench_boost_week: int,
+    chip_strategy: str,
     n_previous: int,
     no_current_season: bool,
     team_model: str,
@@ -247,6 +266,7 @@ def run_pipeline(
                 max_transfers=max_transfers,
                 max_hit=max_hit,
                 allow_unused=allow_unused,
+                chip_strategy=chip_strategy,
             )
             if not opt_ok:
                 msg = "Problem running optimization"
@@ -371,6 +391,7 @@ def run_optimize_squad(
     max_transfers: int,
     max_hit: int,
     allow_unused: bool,
+    chip_strategy: str = "off",
 ) -> bool:
     """
     Build the initial squad
@@ -389,6 +410,7 @@ def run_optimize_squad(
             max_opt_transfers=max_transfers,
             max_total_hit=max_hit,
             allow_unused_transfers=allow_unused,
+            chip_strategy=chip_strategy,
         )
     return True
 

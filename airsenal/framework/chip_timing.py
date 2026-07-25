@@ -20,9 +20,12 @@ Beyond the PR1 foundations (the shared dataclasses, ``get_chip_windows``, and
 - ``recommend_chip_timing``, the decision rule that turns those per-GW
   values into a play-now-or-hold recommendation for each available chip.
 
-No change to existing optimiser behaviour - nothing in this module is wired
-into ``run_optimization``/the pipeline yet (see ``docs/chip_timing_spec.md``
-§8, PR3).
+``recommend_chip_timing`` is wired into ``run_optimization``/the pipeline
+behind ``--chip_strategy auto`` (default ``off``, i.e. no behaviour change
+unless explicitly requested) - see
+``airsenal/scripts/fill_transfersuggestion_table.py``'s
+``resolve_auto_chip_gameweeks`` and ``docs/chip_timing_spec.md`` §4.3/§8
+PR3.
 """
 
 import warnings

@@ -3,10 +3,12 @@ airsenal_chip_report: report estimated per-gameweek chip value and a
 play-now-or-hold recommendation for each available chip (wildcard, free
 hit, bench boost, triple captain).
 
-See docs/chip_timing_spec.md §4.2. This is a read-only report - it does not
-change any existing optimiser behaviour, and (per this PR's scope, see
-airsenal/framework/chip_timing.py's module docstring) is not yet wired into
-airsenal_run_optimization/airsenal_run_pipeline.
+See docs/chip_timing_spec.md §4.2. This is a read-only report - running it
+does not change any existing optimiser behaviour. build_chip_report/
+format_report_text are also reused directly by
+airsenal_run_optimization/airsenal_run_pipeline's ``--chip_strategy auto``
+(see airsenal/scripts/fill_transfersuggestion_table.py's
+resolve_auto_chip_gameweeks, docs/chip_timing_spec.md §4.3).
 """
 
 import argparse

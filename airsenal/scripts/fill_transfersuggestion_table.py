@@ -58,7 +58,10 @@ from airsenal.framework.utils import (
     get_latest_prediction_tag,
     get_player_name,
 )
+from airsenal.scripts.chip_report import build_chip_report, format_report_text
 from airsenal.scripts.squad_builder import fill_initial_squad
+
+CHIP_STRATEGIES = ("auto", "manual", "off")
 
 OUTPUT_DIR = os.path.join(AIRSENAL_HOME, "airsopt")
 
@@ -414,6 +417,73 @@ def print_team_for_next_gw(
     return t
 
 
+def chip_weeks_manually_set(chip_gameweeks: dict) -> bool:
+    """
+    Whether the caller explicitly asked for a chip to be played (or
+    allowed any week), i.e. any chip has a value other than -1 (the
+    "never play" default). Used to make manual --*_week flags always
+    override --chip_strategy auto, per docs/chip_timing_spec.md §4.3.
+    """
+    return any(v != -1 for v in chip_gameweeks.values())
+
+
+def resolve_auto_chip_gameweeks(
+    chip_gameweeks: dict,
+    gameweeks: list[int],
+    season: str,
+    tag: str,
+    fpl_team_id: int,
+) -> tuple[dict, str | None]:
+    """
+    Resolve --chip_strategy auto into concrete chip_gameweeks.
+
+    Calls chip_report.build_chip_report (a thin wrapper around
+    chip_timing.recommend_chip_timing) to get a play-now-or-hold
+    recommendation for every available chip. For each chip recommended
+    play_now=True whose best_gw falls inside the optimisation horizon
+    (``gameweeks``), pins chip_gameweeks[chip] to that gameweek so the
+    existing tree search (construct_chip_dict/next_week_transfers)
+    commits to playing it then and searches for the best transfers
+    around it, rather than enumerating "any week" branches (which biases
+    the search toward burning chips early - see
+    docs/chip_timing_spec.md §3.2). Chips recommended HOLD, or whose
+    best_gw is beyond the horizon, are left unplayed (-1) for this run.
+
+    Never raises: if the recommender fails for any reason (e.g. the FPL
+    API is unavailable, or the team has no chips data), warns and falls
+    back to not playing any chip automatically this run (i.e. behaves
+    like --chip_strategy off), so a chip-timing problem can never crash
+    an optimisation run.
+
+    Returns the (possibly updated) chip_gameweeks dict, and the
+    human-readable chip report text to print/send to Discord (None if
+    the recommender failed).
+    """
+    try:
+        report = build_chip_report(
+            fpl_team_id=fpl_team_id,
+            season=season,
+            tag=tag,
+            gameweeks=gameweeks,
+        )
+    except Exception as e:
+        # A chip-timing problem must never crash the whole optimisation
+        # run - fall back to not playing any chip automatically.
+        warnings.warn(
+            f"Could not compute chip timing recommendation ({e}); "
+            "not playing any chip automatically this run.",
+            stacklevel=2,
+        )
+        return chip_gameweeks, None
+
+    resolved = dict(chip_gameweeks)
+    for chip_name, chip_data in report["chips"].items():
+        rec = chip_data["recommendation"]
+        if rec is not None and rec["play_now"] and rec["best_gw"] in gameweeks:
+            resolved[chip_name] = rec["best_gw"]
+    return resolved, format_report_text(report)
+
+
 def run_optimization(
     gameweeks: list[int],
     tag: str,
@@ -429,6 +499,7 @@ def run_optimization(
     profile: bool = False,
     is_replay: bool = False,  # for replaying seasons
     max_free_transfers: int = MAX_FREE_TRANSFERS,
+    chip_strategy: str = "off",
 ) -> tuple[Squad, dict[str, dict[str, int | list[int]]] | None]:
     """
     This is the actual main function that sets up the multiprocessing
@@ -437,6 +508,15 @@ def run_optimization(
     The chip-related variables e.g. wildcard_week are -1 if that chip
     is not to be played, 0 for 'play it any week', or the gw in which
     it should be played.
+
+    chip_strategy controls how chip_gameweeks is decided when none of the
+    individual chip weeks have been explicitly set (see
+    chip_weeks_manually_set): "off" (default) never plays a chip, "manual"
+    also never plays a chip (it exists so callers can be explicit that they
+    intend to rely solely on the *_week flags), and "auto" asks
+    chip_timing.recommend_chip_timing to decide. Whenever any chip week is
+    explicitly set, that manual choice always wins regardless of
+    chip_strategy - see docs/chip_timing_spec.md §4.3.
     """
     if chip_gameweeks is None:
         chip_gameweeks = {}
@@ -509,6 +589,16 @@ def run_optimization(
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     # first get a baseline prediction
     # baseline_score, baseline_dict = get_baseline_prediction(num_weeks_ahead, tag)
+
+    # Decide what chips to play, if --chip_strategy auto was requested and
+    # the caller hasn't already told us what to do via the *_week flags
+    # (an explicit manual choice always wins - see
+    # docs/chip_timing_spec.md §4.3).
+    chip_report_text: str | None = None
+    if chip_strategy == "auto" and not chip_weeks_manually_set(chip_gameweeks):
+        chip_gameweeks, chip_report_text = resolve_auto_chip_gameweeks(
+            chip_gameweeks, gameweeks, season, tag, fpl_team_id
+        )
 
     # Get a dict of what chips we definitely or possibly will play
     # in each gw
@@ -629,6 +719,12 @@ def run_optimization(
         msg = "Failed to find a strategy!"
         raise ValueError(msg)
 
+    if chip_report_text:
+        print("================")
+        print("CHIP TIMING")
+        print("================\n")
+        print(chip_report_text)
+
     print("================")
     print("OPTIMUM STRATEGY")
     print("================\n")
@@ -673,6 +769,12 @@ def run_optimization(
             for p in subs:
                 lineup_strings.append(f"{p} ({p.team})")
             lineup_strings.append("```\n")
+
+            if chip_report_text:
+                lineup_strings.append("__chip timing__")
+                lineup_strings.append("```")
+                lineup_strings.append(chip_report_text)
+                lineup_strings.append("```\n")
 
             # generate a discord embed json and send to webhook
             payload = discord_payload(best_strategy, lineup_strings)
@@ -777,6 +879,21 @@ def main():
         help="play bench_boost in the specified week. Choose 0 for 'any week'.",
         type=int,
         default=-1,
+    )
+    parser.add_argument(
+        "--chip_strategy",
+        help=(
+            "How to decide when to play chips, when none of the --*_week "
+            "flags above have been set (an explicit --*_week flag always "
+            "overrides this). 'off' (default): never play a chip, "
+            "identical to today's behaviour. 'manual': same as 'off' - "
+            "chips are only played via the --*_week flags. 'auto': use "
+            "airsenal.framework.chip_timing.recommend_chip_timing to "
+            "decide whether to play each available chip within the "
+            "optimisation horizon."
+        ),
+        choices=CHIP_STRATEGIES,
+        default="off",
     )
     parser.add_argument(
         "--num_free_transfers", help="how many free transfers do we have", type=int
@@ -887,4 +1004,5 @@ def main():
             num_thread,
             profile,
             is_replay=args.is_replay,
+            chip_strategy=args.chip_strategy,
         )
