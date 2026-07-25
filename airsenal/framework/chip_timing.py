@@ -2,14 +2,27 @@
 Chip timing & opportunity-cost model.
 
 This module figures out *when* each FPL chip (wildcard, free hit, bench boost,
-triple captain) can be played, and (in later PRs) how much it is worth playing
-in a given gameweek versus holding it for a better future gameweek. See
+triple captain) can be played, and how much it is worth playing in a given
+gameweek versus holding it for a better future gameweek. See
 ``docs/chip_timing_spec.md`` for the full design.
 
-This first module only provides the foundational pieces: the shared
-dataclasses, and the two functions needed to know *when a chip's window is*
-and *what double/blank gameweeks look like* - no value estimation or
-decision-making yet, and no change to existing optimiser behaviour.
+Beyond the PR1 foundations (the shared dataclasses, ``get_chip_windows``, and
+``get_double_blank_gameweeks``), this module provides:
+
+- Four per-chip value estimators (``estimate_triple_captain_value``,
+  ``estimate_bench_boost_value``, ``estimate_wildcard_value``,
+  ``estimate_free_hit_value``), each with a cheap in-horizon "prediction"
+  mode (used when the DB has real points predictions for the target
+  gameweek) and a cheap long-range "proxy" mode (used otherwise, relying on
+  the fitted team model and fixture-count heuristics rather than running the
+  full player-prediction/GA-optimiser machinery for every remaining
+  gameweek of the season).
+- ``recommend_chip_timing``, the decision rule that turns those per-GW
+  values into a play-now-or-hold recommendation for each available chip.
+
+No change to existing optimiser behaviour - nothing in this module is wired
+into ``run_optimization``/the pipeline yet (see ``docs/chip_timing_spec.md``
+§8, PR3).
 """
 
 import warnings
@@ -19,14 +32,23 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm.session import Session
 
+from airsenal.framework.bpl_interface import (
+    fixture_probabilities,
+    get_fitted_team_model,
+)
 from airsenal.framework.data_fetcher import FPLDataFetcher
+from airsenal.framework.optimization_squad import make_new_squad
+from airsenal.framework.optimization_utils import check_tag_valid, get_discount_factor
 from airsenal.framework.schema import Transaction, TransferSuggestion, session
+from airsenal.framework.squad import Squad
 from airsenal.framework.utils import (
     CURRENT_SEASON,
     fetcher,
     get_fixture_teams,
     get_fixtures_for_gameweek,
     get_max_gameweek,
+    get_player,
+    get_predicted_points_for_player,
     list_teams,
 )
 
@@ -257,3 +279,643 @@ def get_double_blank_gameweeks(
             blanks[gw] = gw_blanks
 
     return doubles, blanks
+
+
+# --------------------------------------------------------------------------
+# Per-chip value estimators (docs/chip_timing_spec.md §4.1)
+# --------------------------------------------------------------------------
+#
+# Each estimator has two regimes, selected by whether the DB has real points
+# predictions for the target gameweek (check_tag_valid):
+#
+# - "prediction" (in-horizon): uses the real prediction machinery
+#   (Squad.get_expected_points, get_predicted_points_for_player, or - for
+#   wildcard/free hit - a full make_new_squad GA optimisation). Only ever
+#   run for the handful of gameweeks that have predictions (typically the
+#   next few), since the GA-based estimates in particular are expensive.
+# - "proxy" (long-range): cheap heuristics based on the fitted team model
+#   (win/draw probability) and fixture counts (get_double_blank_gameweeks),
+#   used for every other remaining gameweek of the season. These must stay
+#   well under 1s per gameweek, which is why the team model is fit once and
+#   cached (see _get_cached_team_model) rather than refit per call.
+#
+# The constants below are coarse, documented heuristics for the proxy
+# regime - precision matters far less here than for in-horizon estimates,
+# since a gameweek many weeks away is inherently uncertain (see
+# docs/chip_timing_spec.md §4.1, wildcard docstring).
+
+PREMIUM_CAPTAIN_BASELINE_PTS = 7.0  # ~pts/fixture for a generic top captain pick
+BENCH_BASELINE_TOTAL_PTS = 7.0  # ~total pts for a full bench in a normal (non-DGW) GW
+AVG_STARTER_PTS = 4.0  # ~pts for an average replacement starter (free hit blanks)
+DGW_UPSIDE_PTS_PER_TEAM = 3.0  # extra value per doubling team a free-hit XI can exploit
+STALENESS_PTS_PER_ISSUE = (
+    2.0  # ~pts cost per "stale squad" issue, see estimate_wildcard_value
+)
+PROXY_UNCERTAINTY_PENALTY = 0.9  # discount applied to proxy-derived future values
+WILDCARD_PROXY_HORIZON = (
+    3  # GWs used for the in-horizon wildcard optimum-squad comparison
+)
+
+_team_model_cache: dict[tuple[str, int], object] = {}
+_captain_baseline_cache: dict[tuple[int, str, str], tuple[str | None, float]] = {}
+
+
+def _get_cached_team_model(season: str, dbsession: Session):
+    """Fit (once per season/session) and cache the team model used by the
+    long-range proxies below.
+
+    Fitting a Dixon-Coles-style team model is the expensive part of using
+    it - evaluating fixture probabilities from an already-fitted model is
+    cheap. Caching here is what keeps the proxy estimators within the
+    <1s-per-GW budget required by the spec: without it, a proxy call for
+    every remaining gameweek of the season would each refit the model from
+    scratch. get_fitted_team_model only ever trains on completed Result
+    rows regardless of the "gameweek" cutoff passed to it, so it doesn't
+    matter which gameweek we happen to fit with first for a given
+    season/session.
+    """
+    key = (season, id(dbsession))
+    if key not in _team_model_cache:
+        max_gw = get_max_gameweek(season, dbsession)
+        _team_model_cache[key] = get_fitted_team_model(season, max_gw, dbsession)
+    return _team_model_cache[key]
+
+
+def _team_fixture_strength(
+    team: str, gw: int, season: str, dbsession: Session
+) -> float:
+    """A team-model-derived scaling factor in [0, 1] for how favourable a
+    team's fixture(s) are in a gameweek: win probability plus half the draw
+    probability, averaged over the team's fixture(s) that GW (so doubles
+    naturally average rather than double-count).
+
+    Returns a neutral 0.5 if the team has no fixture that GW, or if fixture
+    probabilities aren't available for any reason (e.g. the team model
+    failed to fit) - this is a proxy signal, not a critical calculation, so
+    fail soft rather than raise.
+    """
+    try:
+        model = _get_cached_team_model(season, dbsession)
+        probs = fixture_probabilities(gw, season, model=model, dbsession=dbsession)
+    except Exception:
+        return 0.5
+    scales = [
+        row.home_win_probability + 0.5 * row.draw_probability
+        for row in probs.itertuples()
+        if row.home_team == team
+    ] + [
+        row.away_win_probability + 0.5 * row.draw_probability
+        for row in probs.itertuples()
+        if row.away_team == team
+    ]
+    if not scales:
+        return 0.5
+    return sum(scales) / len(scales)
+
+
+def _best_captain_baseline(
+    squad: Squad, tag: str, season: str, dbsession: Session
+) -> tuple[str | None, float]:
+    """Best current-squad captain candidate for the long-range triple
+    captain proxy: whichever squad player has the highest average
+    points-per-fixture across any gameweeks predictions exist for, and
+    that average. Falls back to (None, PREMIUM_CAPTAIN_BASELINE_PTS) if the
+    squad has no predictions at all (e.g. a brand new squad/season).
+
+    Cached per (squad, tag, season) since it doesn't depend on gw - without
+    caching, this would be recomputed (with a handful of DB queries each)
+    for every long-range gameweek evaluated.
+    """
+    key = (id(squad), tag, season)
+    if key in _captain_baseline_cache:
+        return _captain_baseline_cache[key]
+
+    best_team: str | None = None
+    best_avg = 0.0
+    for p in squad.players:
+        preds = get_predicted_points_for_player(p.player_id, tag, season, dbsession)
+        nonzero = [v for v in preds.values() if v > 0]
+        if not nonzero:
+            continue
+        avg = sum(nonzero) / len(nonzero)
+        if avg > best_avg:
+            best_avg = avg
+            best_team = p.team
+
+    result = (
+        (None, PREMIUM_CAPTAIN_BASELINE_PTS)
+        if best_team is None
+        else (best_team, best_avg)
+    )
+    _captain_baseline_cache[key] = result
+    return result
+
+
+def estimate_triple_captain_value(
+    gw: int,
+    squad: Squad,
+    tag: str,
+    season: str = CURRENT_SEASON,
+    dbsession: Session = session,
+) -> ChipValue:
+    """Estimate the value of playing triple captain in gameweek ``gw``.
+
+    In-horizon (predictions exist for ``gw``): the extra 1x of points the
+    chip adds is the best candidate captain's predicted points that
+    gameweek - the max, over the current squad, of
+    get_predicted_points_for_player (which already sums over the GW's
+    fixtures, so doubles are handled automatically).
+
+    Long-range proxy (no predictions yet): (the current squad's best
+    captain candidate's average points-per-fixture, or
+    PREMIUM_CAPTAIN_BASELINE_PTS if the squad has no predictions at all) x
+    (number of fixtures that player's team has in ``gw``, from
+    get_double_blank_gameweeks) x (a team-model-derived win/draw scaling
+    factor, see _team_fixture_strength).
+    """
+    doubles, blanks = get_double_blank_gameweeks(season, dbsession)
+    double_teams = set(doubles.get(gw, []))
+    blank_teams = set(blanks.get(gw, []))
+
+    if check_tag_valid(tag, [gw], season, dbsession):
+        best_player = None
+        best_points = 0.0
+        for p in squad.players:
+            points = get_predicted_points_for_player(
+                p.player_id, tag, season, dbsession
+            ).get(gw, 0.0)
+            if points > best_points:
+                best_points = points
+                best_player = p
+        is_double = best_player is not None and best_player.team in double_teams
+        notes = f"best candidate: {best_player}" if best_player else "no candidate"
+        return ChipValue(
+            chip="triple_captain",
+            gameweek=gw,
+            expected_gain=best_points,
+            method="prediction",
+            is_double=is_double,
+            notes=notes,
+        )
+
+    team, points_per_fixture = _best_captain_baseline(squad, tag, season, dbsession)
+    if team is None:
+        fixture_count = 1
+        strength = 0.5
+        notes = "no squad predictions available; generic premium-player baseline"
+        is_double = False
+    else:
+        if team in blank_teams:
+            fixture_count = 0
+        elif team in double_teams:
+            fixture_count = 2
+        else:
+            fixture_count = 1
+        strength = _team_fixture_strength(team, gw, season, dbsession)
+        notes = f"proxy based on best captain candidate ({team})"
+        is_double = team in double_teams
+    return ChipValue(
+        chip="triple_captain",
+        gameweek=gw,
+        expected_gain=points_per_fixture * fixture_count * strength,
+        method="proxy",
+        is_double=is_double,
+        notes=notes,
+    )
+
+
+def estimate_bench_boost_value(
+    gw: int,
+    squad: Squad,
+    tag: str,
+    season: str = CURRENT_SEASON,
+    dbsession: Session = session,
+) -> ChipValue:
+    """Estimate the value of playing bench boost in gameweek ``gw``.
+
+    In-horizon: squad.get_expected_points(gw, tag, bench_boost=True) minus
+    squad.get_expected_points(gw, tag) - the bench's contribution with full
+    (bench-boost) weights, via Squad.total_points_for_subs.
+
+    Long-range proxy: the current bench (whichever 4 players aren't
+    currently flagged as starting XI, reflecting the most recently
+    optimised lineup - a future gameweek's actual bench composition isn't
+    knowable this far out) x a baseline points-per-fixture derived from
+    BENCH_BASELINE_TOTAL_PTS (split evenly across the 4 bench slots),
+    scaled by each bench player's fixture count that GW (so doubles count
+    double, blanks count zero).
+    """
+    doubles, blanks = get_double_blank_gameweeks(season, dbsession)
+    double_teams = set(doubles.get(gw, []))
+    blank_teams = set(blanks.get(gw, []))
+
+    if check_tag_valid(tag, [gw], season, dbsession):
+        with_bb = squad.get_expected_points(gw, tag, bench_boost=True)
+        without_bb = squad.get_expected_points(gw, tag)
+        bench = [p for p in squad.players if not p.is_starting]
+        is_double = any(p.team in double_teams for p in bench)
+        return ChipValue(
+            chip="bench_boost",
+            gameweek=gw,
+            expected_gain=with_bb - without_bb,
+            method="prediction",
+            is_double=is_double,
+        )
+
+    bench = [p for p in squad.players if not p.is_starting]
+    if not bench:
+        # lineup never optimised (e.g. brand new squad) - approximate the
+        # bench as the 4 lowest-priced players.
+        bench = sorted(squad.players, key=lambda p: p.purchase_price)[:4]
+    per_slot = BENCH_BASELINE_TOTAL_PTS / 4
+    gain = 0.0
+    is_double = False
+    for p in bench:
+        if p.team in blank_teams:
+            fixture_count = 0
+        elif p.team in double_teams:
+            fixture_count = 2
+            is_double = True
+        else:
+            fixture_count = 1
+        gain += per_slot * fixture_count
+    return ChipValue(
+        chip="bench_boost",
+        gameweek=gw,
+        expected_gain=gain,
+        method="proxy",
+        is_double=is_double,
+        notes=f"proxy over {len(bench)} bench players",
+    )
+
+
+def estimate_wildcard_value(
+    gw: int,
+    squad: Squad,
+    tag: str,
+    season: str = CURRENT_SEASON,
+    dbsession: Session = session,
+    num_iterations: int = 100,
+) -> ChipValue:
+    """Estimate the value of playing wildcard in gameweek ``gw``.
+
+    In-horizon: build an unconstrained optimal squad (via make_new_squad,
+    reusing the current squad's total sale value - Squad.sale_value - as
+    the budget) for up to WILDCARD_PROXY_HORIZON gameweeks starting at
+    ``gw`` (clipped to whichever of those actually have predictions), and
+    compare its total expected points over that range to the current
+    squad's. This is expensive (runs the GA with num_iterations
+    population/generations), so it is only ever done for in-horizon
+    gameweeks. Note the estimator only receives a single target gameweek
+    rather than a full horizon, so WILDCARD_PROXY_HORIZON is a documented
+    simplification of the spec's "[gw, horizon]" wording.
+
+    Long-range proxy: a simple "squad staleness" heuristic - count, among
+    the current 15 players: (a) those with no fixture that GW (blank), (b)
+    those flagged injured/suspended (<=50% chance of playing, via
+    Player.is_injured_or_suspended), and (c) those with a below-average
+    upcoming fixture (team-model win/draw scaling < 0.4, see
+    _team_fixture_strength) that GW - then multiply the total count by
+    STALENESS_PTS_PER_ISSUE. This deliberately doesn't try to estimate the
+    *upside* of a full squad rebuild that far out (per the spec, wildcard
+    value is dominated by squad state, which is only reliably known
+    near-term); it is a coarse relative-ordering signal, not a precise
+    points estimate.
+    """
+    doubles, blanks = get_double_blank_gameweeks(season, dbsession)
+    double_teams = set(doubles.get(gw, []))
+    blank_teams = set(blanks.get(gw, []))
+
+    if check_tag_valid(tag, [gw], season, dbsession):
+        max_gw = get_max_gameweek(season, dbsession)
+        gw_range = [
+            g
+            for g in range(gw, min(gw + WILDCARD_PROXY_HORIZON, max_gw + 1))
+            if check_tag_valid(tag, [g], season, dbsession)
+        ] or [gw]
+        budget = squad.sale_value(gw, use_api=False)
+        optimal_squad = make_new_squad(
+            gw_range,
+            tag,
+            budget=budget,
+            season=season,
+            verbose=False,
+            population_size=num_iterations,
+            generations=num_iterations,
+        )
+        optimal_points = sum(
+            optimal_squad.get_expected_points(g, tag) for g in gw_range
+        )
+        current_points = sum(squad.get_expected_points(g, tag) for g in gw_range)
+        is_double = any(p.team in double_teams for p in squad.players) or any(
+            p.team in double_teams for p in optimal_squad.players
+        )
+        return ChipValue(
+            chip="wildcard",
+            gameweek=gw,
+            expected_gain=optimal_points - current_points,
+            method="prediction",
+            is_double=is_double,
+            notes=f"optimum vs current squad over GWs {gw_range}",
+        )
+
+    n_blank = sum(1 for p in squad.players if p.team in blank_teams)
+    n_injured = 0
+    for p in squad.players:
+        player_row = get_player(p.player_id, dbsession)
+        if player_row is not None and player_row.is_injured_or_suspended(
+            season, gw, gw
+        ):
+            n_injured += 1
+    n_poor_fixture = sum(
+        1
+        for p in squad.players
+        if p.team not in blank_teams
+        and _team_fixture_strength(p.team, gw, season, dbsession) < 0.4
+    )
+    n_issues = n_blank + n_injured + n_poor_fixture
+    is_double = any(p.team in double_teams for p in squad.players)
+    return ChipValue(
+        chip="wildcard",
+        gameweek=gw,
+        expected_gain=n_issues * STALENESS_PTS_PER_ISSUE,
+        method="proxy",
+        is_double=is_double,
+        notes=(
+            f"staleness proxy: {n_blank} blank, {n_injured} injured/suspended, "
+            f"{n_poor_fixture} poor fixture"
+        ),
+    )
+
+
+def estimate_free_hit_value(
+    gw: int,
+    squad: Squad,
+    tag: str,
+    season: str = CURRENT_SEASON,
+    dbsession: Session = session,
+    num_iterations: int = 100,
+) -> ChipValue:
+    """Estimate the value of playing free hit in gameweek ``gw``.
+
+    In-horizon: like wildcard, but for ``gw`` alone (the free hit squad
+    reverts after one week) - an unconstrained optimal one-week squad (via
+    make_new_squad, reusing the current squad's total sale value as the
+    budget) minus the current squad's expected points, both for ``gw``
+    only.
+
+    Long-range proxy: dominated by blanks/doubles, per the spec - (number
+    of current-squad players with no fixture that GW) x AVG_STARTER_PTS,
+    plus a flat DGW upside per doubling team (DGW_UPSIDE_PTS_PER_TEAM)
+    reflecting that a free-hit XI could be packed with doubling-team
+    players the current squad doesn't have.
+    """
+    doubles, blanks = get_double_blank_gameweeks(season, dbsession)
+    double_teams = set(doubles.get(gw, []))
+    blank_teams = set(blanks.get(gw, []))
+
+    if check_tag_valid(tag, [gw], season, dbsession):
+        budget = squad.sale_value(gw, use_api=False)
+        optimal_squad = make_new_squad(
+            [gw],
+            tag,
+            budget=budget,
+            season=season,
+            verbose=False,
+            population_size=num_iterations,
+            generations=num_iterations,
+        )
+        optimal_points = optimal_squad.get_expected_points(gw, tag)
+        current_points = squad.get_expected_points(gw, tag)
+        is_double = any(p.team in double_teams for p in squad.players) or any(
+            p.team in double_teams for p in optimal_squad.players
+        )
+        return ChipValue(
+            chip="free_hit",
+            gameweek=gw,
+            expected_gain=optimal_points - current_points,
+            method="prediction",
+            is_double=is_double,
+            notes="optimum vs current squad, single GW",
+        )
+
+    n_blank = sum(1 for p in squad.players if p.team in blank_teams)
+    gain = n_blank * AVG_STARTER_PTS + len(double_teams) * DGW_UPSIDE_PTS_PER_TEAM
+    return ChipValue(
+        chip="free_hit",
+        gameweek=gw,
+        expected_gain=gain,
+        method="proxy",
+        is_double=bool(double_teams),
+        notes=f"{n_blank} squad players blank, {len(double_teams)} teams doubling",
+    )
+
+
+CHIP_ESTIMATORS = {
+    "triple_captain": estimate_triple_captain_value,
+    "bench_boost": estimate_bench_boost_value,
+    "wildcard": estimate_wildcard_value,
+    "free_hit": estimate_free_hit_value,
+}
+
+
+# --------------------------------------------------------------------------
+# Decision rule (docs/chip_timing_spec.md §4.1)
+# --------------------------------------------------------------------------
+#
+# NOTE on where this lives: docs/chip_timing_spec.md §8 nominally assigns
+# recommend_chip_timing to PR3 (alongside optimiser integration), but §4.1
+# places its signature/docstring in the same "New module" section as the
+# estimators above, and §4.2's CLI example output includes a
+# "RECOMMENDATION: HOLD/PLAY" line that only this function can produce.
+# Resolved here (see this PR's description) by implementing the decision
+# rule now, so airsenal_chip_report can produce real recommendations - but
+# NOT wiring it into run_optimization/the pipeline (--chip_strategy,
+# fill_transfersuggestion_table.py, airsenal_run_pipeline.py), which is left
+# for PR3 as originally planned.
+
+
+def _discounted_score(value: ChipValue, next_gw: int, proxy_penalty: float) -> float:
+    """Discounted, uncertainty-penalised score used to rank/argmax
+    ChipValues in the decision rule below. This is *not* what gets
+    reported for display - the report shows each ChipValue's raw
+    expected_gain (see airsenal/scripts/chip_report.py).
+    """
+    discount = get_discount_factor(next_gw, value.gameweek)
+    penalty = proxy_penalty if value.method == "proxy" else 1.0
+    return value.expected_gain * discount * penalty
+
+
+def _recommend_for_window(
+    window: ChipWindow,
+    values: list[ChipValue],
+    next_gw: int,
+    horizon_gws: set[int],
+    risk_lambda: float,
+    proxy_penalty: float,
+    excluded_gws: set[int],
+) -> ChipRecommendation:
+    """Build a single chip's recommendation from its precomputed per-GW
+    ChipValues, treating any GW in ``excluded_gws`` (already claimed by a
+    higher-priority chip, see recommend_chip_timing's conflict resolution)
+    as unavailable.
+    """
+    candidates = [v for v in values if v.gameweek not in excluded_gws]
+    if not candidates:
+        # Nothing left to recommend (every candidate GW was claimed by
+        # another chip) - hold, with no meaningful best_gw.
+        return ChipRecommendation(
+            chip=window.name,
+            play_now=False,
+            best_gw=window.end_gw,
+            gain_now=0.0,
+            best_future_gain=0.0,
+            deadline_gw=window.end_gw,
+            values=values,
+        )
+
+    in_horizon = [v for v in candidates if v.gameweek in horizon_gws]
+    post_horizon = [v for v in candidates if v.gameweek not in horizon_gws]
+
+    gain_now = max((v.expected_gain for v in in_horizon), default=0.0)
+
+    if post_horizon:
+        best_future_value = max(
+            post_horizon, key=lambda v: _discounted_score(v, next_gw, proxy_penalty)
+        )
+        best_future_gain = _discounted_score(best_future_value, next_gw, proxy_penalty)
+    else:
+        best_future_gain = 0.0
+
+    best_value = max(
+        candidates, key=lambda v: _discounted_score(v, next_gw, proxy_penalty)
+    )
+    best_gw = best_value.gameweek
+
+    play_now = gain_now >= risk_lambda * best_future_gain
+    # Never let a chip expire unused: force a play if the deadline falls
+    # inside the horizon and there is positive value in playing now.
+    if window.end_gw in horizon_gws and gain_now > 0:
+        play_now = True
+
+    if play_now and in_horizon:
+        # Report the best *in-horizon* gameweek as the target, not whichever
+        # far-future GW happened to win the (discounted) argmax above.
+        best_gw = max(in_horizon, key=lambda v: v.expected_gain).gameweek
+
+    return ChipRecommendation(
+        chip=window.name,
+        play_now=play_now,
+        best_gw=best_gw,
+        gain_now=gain_now,
+        best_future_gain=best_future_gain,
+        deadline_gw=window.end_gw,
+        values=values,
+    )
+
+
+def recommend_chip_timing(
+    chip_windows: list[ChipWindow],
+    squad: Squad,
+    tag: str,
+    gameweeks: list[int],
+    season: str = CURRENT_SEASON,
+    risk_lambda: float = 0.8,
+    dbsession: Session = session,
+) -> list[ChipRecommendation]:
+    """For each currently-available chip:
+
+    1. Compute a ChipValue for every GW from next_gw (min of ``gameweeks``)
+       to its window's deadline.
+    2. gain_now = max expected_gain over the in-horizon GWs (``gameweeks``).
+    3. best_future_gain = max, over post-horizon GWs, of expected_gain *
+       get_discount_factor(next_gw, gw) * proxy_penalty, where
+       proxy_penalty (PROXY_UNCERTAINTY_PENALTY, default 0.9) reflects
+       estimation uncertainty for long-range (proxy) values.
+    4. play_now = gain_now >= risk_lambda * best_future_gain. Deadline
+       pressure is handled naturally: as the deadline nears, the set of
+       future GWs shrinks, so best_future_gain falls and play_now flips to
+       True before the chip can expire. Additionally, play_now is forced
+       True if the deadline is within the current horizon and gain_now > 0
+       (never let a chip expire unused).
+    5. Only one chip per GW: if two chips both say "play now" for the same
+       GW, keep the one with the larger
+       (gain_now - risk_lambda * best_future_gain) margin and defer the
+       other by excluding that GW and recomputing its recommendation.
+
+    If a chip has two windows (one per half-season) and both are marked
+    available, only the currently "live" one (not yet past its deadline,
+    preferring the earlier-starting window) is considered - the other is
+    simply out of scope for a report about "now".
+    """
+    if not gameweeks:
+        return []
+    next_gw = min(gameweeks)
+    horizon_gws = set(gameweeks)
+    proxy_penalty = PROXY_UNCERTAINTY_PENALTY
+
+    current_windows: dict[str, ChipWindow] = {}
+    for window in chip_windows:
+        if not window.available or window.end_gw < next_gw:
+            continue
+        existing = current_windows.get(window.name)
+        if existing is None or window.start_gw < existing.start_gw:
+            current_windows[window.name] = window
+
+    per_chip_values: dict[str, list[ChipValue]] = {}
+    for name, window in current_windows.items():
+        estimator = CHIP_ESTIMATORS[name]
+        gws = range(max(next_gw, window.start_gw), window.end_gw + 1)
+        per_chip_values[name] = [
+            estimator(g, squad, tag, season, dbsession) for g in gws
+        ]
+
+    excluded_gws: dict[str, set[int]] = {name: set() for name in current_windows}
+    recommendations: dict[str, ChipRecommendation] = {
+        name: _recommend_for_window(
+            window,
+            per_chip_values[name],
+            next_gw,
+            horizon_gws,
+            risk_lambda,
+            proxy_penalty,
+            excluded_gws[name],
+        )
+        for name, window in current_windows.items()
+    }
+
+    # Resolve "only one chip per GW" conflicts among chips both recommended
+    # to play_now for the same gameweek: keep the larger-margin chip, defer
+    # the rest by excluding that GW and recomputing their recommendation.
+    # Bounded to len(current_windows) passes - at most 4 chips, so this is
+    # always enough to resolve any chain of conflicts.
+    for _ in range(len(current_windows)):
+        by_gw: dict[int, list[str]] = defaultdict(list)
+        for name, rec in recommendations.items():
+            if rec.play_now:
+                by_gw[rec.best_gw].append(name)
+        conflicts = {gw: names for gw, names in by_gw.items() if len(names) > 1}
+        if not conflicts:
+            break
+
+        def _margin(name: str) -> float:
+            rec = recommendations[name]
+            return rec.gain_now - risk_lambda * rec.best_future_gain
+
+        for gw, names in conflicts.items():
+            winner = max(names, key=_margin)
+            for name in names:
+                if name == winner:
+                    continue
+                excluded_gws[name].add(gw)
+                recommendations[name] = _recommend_for_window(
+                    current_windows[name],
+                    per_chip_values[name],
+                    next_gw,
+                    horizon_gws,
+                    risk_lambda,
+                    proxy_penalty,
+                    excluded_gws[name],
+                )
+
+    return list(recommendations.values())
