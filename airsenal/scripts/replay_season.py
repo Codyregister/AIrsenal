@@ -22,7 +22,10 @@ from airsenal.framework.utils import (
     parse_team_model_from_str,
 )
 from airsenal.scripts.fill_predictedscore_table import make_predictedscore_table
-from airsenal.scripts.fill_transfersuggestion_table import run_optimization
+from airsenal.scripts.fill_transfersuggestion_table import (
+    CHIP_STRATEGIES,
+    run_optimization,
+)
 from airsenal.scripts.squad_builder import fill_initial_squad
 
 
@@ -62,9 +65,48 @@ def replay_season(
     team_model_args: dict | None = None,
     fpl_team_id: int | None = None,
     max_opt_transfers: int = 2,
-) -> None:
+    chip_strategy: str = "off",
+    chip_gameweeks: dict | None = None,
+    risk_lambda: float = 0.8,
+    num_iterations: int = 100,
+) -> dict[str, str | int | float | list | dict]:
+    """Replay (all or part of) a past season, optimising transfers (and,
+    depending on ``chip_strategy``, chips) gameweek by gameweek, and write
+    the results to ``{tag_prefix}.json``.
+
+    chip_strategy / chip_gameweeks / risk_lambda are passed straight through
+    to ``run_optimization`` every gameweek (see docs/chip_timing_spec.md
+    §4.4's validation plan):
+
+    - "off" (default): chips are never played - bit-identical to AIrsenal's
+      pre-chip-timing behaviour.
+    - "manual": chips are only played according to ``chip_gameweeks`` (e.g.
+      all four chips set to 0, "any week", reproduces the greedy
+      any-week-is-fine behaviour that predates this feature).
+    - "auto": ``chip_timing.recommend_chip_timing`` decides when (if at all)
+      to play each chip, tuned by ``risk_lambda``.
+
+    num_iterations controls the population/generation size of the DEAP GA
+    used both for the initial squad build (fill_initial_squad) and for any
+    wildcard/free-hit candidate squad rebuilt while searching the transfer
+    strategy tree (run_optimization -> make_new_squad). It defaults to 100
+    to match production, but validation replays - especially with
+    chip_strategy values that let the tree search consider wildcard/free
+    hit in many candidate gameweeks (e.g. "manual" with all *_week=0) -
+    can multiply that cost by dozens of GA reruns per gameweek; passing a
+    smaller value (e.g. 15-20) trades optimisation precision for tractable
+    replay wall-clock time. See docs/chip_timing_spec.md §4.4.
+
+    Returns the ``replay_results`` dict that's also written to
+    ``{tag_prefix}.json`` (including ``total_actual_points`` /
+    ``total_expected_points`` season totals, and - per-gameweek - which
+    chip, if any, was played), so callers (e.g. a validation script running
+    several configurations back to back) don't have to re-read the file.
+    """
     if team_model_args is None:
         team_model_args = {"epsilon": DEFAULT_TEAM_EPSILON}
+    if chip_gameweeks is None:
+        chip_gameweeks = {}
     start = datetime.now()
     if gameweek_end is None:
         gameweek_end = get_max_gameweek(season)
@@ -82,10 +124,13 @@ def replay_season(
     team_model_class = parse_team_model_from_str(team_model)
 
     # store results in a dictionary, which we will later save to a json file
-    replay_results: dict[str, str | int | float | list] = {}
+    replay_results: dict[str, str | int | float | list | dict] = {}
     replay_results["tag"] = tag_prefix
     replay_results["season"] = season
     replay_results["weeks_ahead"] = weeks_ahead
+    replay_results["chip_strategy"] = chip_strategy
+    replay_results["chip_gameweeks"] = dict(chip_gameweeks)
+    replay_results["risk_lambda"] = risk_lambda
     replay_results["gameweeks"] = []
     replay_range = range(gameweek_start, gameweek_end + 1)
     for idx, gw in enumerate(tqdm(replay_range, desc="REPLAY PROGRESS")):
@@ -110,7 +155,13 @@ def replay_season(
         if gw == gameweek_start and new_squad:
             print("Creating initial squad...")
             squad = fill_initial_squad(
-                tag, gw_range, season, fpl_team_id, is_replay=True
+                tag,
+                gw_range,
+                season,
+                fpl_team_id,
+                num_generations=num_iterations,
+                population_size=num_iterations,
+                is_replay=True,
             )
             # no points hits due to unlimited transfers to initialise team
             best_strategy: dict[str, dict[str, int | list[int]]] | None = {
@@ -131,6 +182,10 @@ def replay_season(
                 num_thread=num_thread,
                 is_replay=True,
                 max_opt_transfers=max_opt_transfers,
+                num_iterations=num_iterations,
+                chip_gameweeks=dict(chip_gameweeks),
+                chip_strategy=chip_strategy,
+                risk_lambda=risk_lambda,
             )
         if best_strategy is None:
             msg = f"Failed to find a strategy for GW{gw}!"
@@ -151,6 +206,22 @@ def replay_season(
         gw_result["free_transfers"] = best_strategy["free_transfers"][str(gw)]
         gw_result["num_transfers"] = best_strategy["num_transfers"][str(gw)]
         gw_result["points_hit"] = best_strategy["points_hit"][str(gw)]
+        # Which chip, if any, was actually committed to this gameweek (as
+        # opposed to merely considered somewhere later in this week's
+        # look-ahead horizon - only the current gameweek's part of the
+        # strategy is ever actually "applied", matching fill_transaction_table's
+        # fill_gw = min(strat_gws) semantics above).
+        chip_played_this_gw = best_strategy.get("chips_played", {}).get(str(gw))
+        gw_result["chip_played"] = chip_played_this_gw
+        if chip_played_this_gw is not None:
+            # A chip can only be played once per season. run_optimization has
+            # no season-level memory of chips played in earlier weeks of this
+            # replay (chip_strategy="auto" infers it from TransferSuggestion
+            # rows in the DB, but chip_strategy="off"/"manual" - i.e. the
+            # static chip_gameweeks passed in below - does not), so once a
+            # chip has actually been played, stop offering it again for the
+            # rest of this replay.
+            chip_gameweeks[chip_played_this_gw] = -1
         players_in = best_strategy["players_in"][str(gw)]
         players_out = best_strategy["players_out"][str(gw)]
         if not isinstance(players_in, list) or not isinstance(players_out, list):
@@ -186,10 +257,31 @@ def replay_season(
     end = datetime.now()
     elapsed = end - start
     replay_results["elapsed"] = elapsed.total_seconds()
+    gw_results = replay_results["gameweeks"]
+    if not isinstance(gw_results, list):
+        msg = f"replay_results['gameweeks'] should be a list, got {type(gw_results)}"
+        raise TypeError(msg)
+    replay_results["total_actual_points"] = sum(
+        gwr["actual_points"] for gwr in gw_results if "actual_points" in gwr
+    )
+    replay_results["total_expected_points"] = sum(
+        gwr["expected_points"] for gwr in gw_results if "expected_points" in gwr
+    )
+    replay_results["chips_played"] = {
+        gwr["gameweek"]: gwr["chip_played"]
+        for gwr in gw_results
+        if gwr.get("chip_played") is not None
+    }
     with open(f"{tag_prefix}.json", "w") as outfile:
         json.dump(replay_results, outfile)
     print_replay_params(season, gameweek_start, gameweek_end, tag_prefix, fpl_team_id)
+    print(
+        f"Total actual points: {replay_results['total_actual_points']}, "
+        f"total expected points: {replay_results['total_expected_points']:.1f}, "
+        f"chips played: {replay_results['chips_played']}"
+    )
     print("DONE!")
+    return replay_results
 
 
 def main():
@@ -259,6 +351,72 @@ def main():
         type=int,
         default=2,
     )
+    parser.add_argument(
+        "--chip_strategy",
+        help=(
+            "How to decide when to play chips, when none of the --*_week "
+            "options below have been set (an explicit --*_week option always "
+            "overrides this). 'off' (default): never play a chip - matches "
+            "AIrsenal's pre-chip-timing behaviour. 'manual': same as 'off' - "
+            "chips are only played via the --*_week options (e.g. all four "
+            "set to 0, 'any week', reproduces the historic greedy "
+            "any-week-is-fine behaviour). 'auto': use "
+            "airsenal.framework.chip_timing.recommend_chip_timing to decide "
+            "whether to play each available chip within the optimisation "
+            "horizon. See docs/chip_timing_spec.md §4.3/§4.4."
+        ),
+        choices=CHIP_STRATEGIES,
+        default="off",
+    )
+    parser.add_argument(
+        "--wildcard_week",
+        help="play wildcard in the specified week. Choose 0 for 'any week'.",
+        type=int,
+        default=-1,
+    )
+    parser.add_argument(
+        "--free_hit_week",
+        help="play free hit in the specified week. Choose 0 for 'any week'.",
+        type=int,
+        default=-1,
+    )
+    parser.add_argument(
+        "--triple_captain_week",
+        help="play triple captain in the specified week. Choose 0 for 'any week'.",
+        type=int,
+        default=-1,
+    )
+    parser.add_argument(
+        "--bench_boost_week",
+        help="play bench_boost in the specified week. Choose 0 for 'any week'.",
+        type=int,
+        default=-1,
+    )
+    parser.add_argument(
+        "--risk_lambda",
+        help=(
+            "Only used when --chip_strategy=auto: how much to discount "
+            "future chip value relative to playing now. See "
+            "docs/chip_timing_spec.md §4.1/§4.4."
+        ),
+        type=float,
+        default=0.8,
+    )
+    parser.add_argument(
+        "--num_iterations",
+        help=(
+            "Population/generation size for the DEAP GA used for the "
+            "initial squad build and any wildcard/free-hit candidate "
+            "squads considered during the transfer-strategy search. "
+            "Defaults to 100 (production default); lower values (e.g. "
+            "15-20) trade optimisation precision for much faster replay "
+            "wall-clock time - useful when replaying with chip_strategy "
+            "values that let the search consider wildcard/free hit in "
+            "many candidate gameweeks."
+        ),
+        type=int,
+        default=100,
+    )
 
     args = parser.parse_args()
     if args.resume and not args.fpl_team_id:
@@ -285,6 +443,15 @@ def main():
                 team_model=args.team_model,
                 team_model_args={"epsilon": args.epsilon},
                 max_opt_transfers=args.max_transfers,
+                chip_strategy=args.chip_strategy,
+                chip_gameweeks={
+                    "wildcard": args.wildcard_week,
+                    "free_hit": args.free_hit_week,
+                    "triple_captain": args.triple_captain_week,
+                    "bench_boost": args.bench_boost_week,
+                },
+                risk_lambda=args.risk_lambda,
+                num_iterations=args.num_iterations,
             )
             n_completed += 1
 

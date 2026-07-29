@@ -261,7 +261,9 @@ def test_chip_strategy_manual_with_explicit_week_is_respected(
 def test_chip_strategy_auto_calls_resolver_and_pins_recommended_chip(
     process_calls, monkeypatch
 ):
-    def fake_resolver(chip_gameweeks, gameweeks, season, tag, fpl_team_id):
+    def fake_resolver(
+        chip_gameweeks, gameweeks, season, tag, fpl_team_id, risk_lambda=0.8
+    ):
         return {**chip_gameweeks, "wildcard": 11}, "REPORT"
 
     monkeypatch.setattr(fts, "resolve_auto_chip_gameweeks", fake_resolver)
@@ -350,7 +352,9 @@ def test_new_team_first_week_skips_chip_resolution_entirely(process_calls, monke
 
 
 def test_2223_world_cup_hack_overrides_auto_recommendation(process_calls, monkeypatch):
-    def fake_resolver(chip_gameweeks, gameweeks, season, tag, fpl_team_id):
+    def fake_resolver(
+        chip_gameweeks, gameweeks, season, tag, fpl_team_id, risk_lambda=0.8
+    ):
         # auto would like to play triple_captain in gw17...
         return {**chip_gameweeks, "triple_captain": 17}, "REPORT"
 

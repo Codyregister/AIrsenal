@@ -106,6 +106,17 @@ from airsenal.scripts.update_db import update_db
     ),
 )
 @click.option(
+    "--risk_lambda",
+    type=float,
+    default=0.8,
+    help=(
+        "Only used when --chip_strategy=auto: how much to discount future "
+        "chip value relative to playing now (higher = more conservative, "
+        "prefers holding chips for later). See "
+        "docs/chip_timing_spec.md §4.1/§4.4."
+    ),
+)
+@click.option(
     "--n_previous",
     help="specify how many seasons to look back into the past for (defaults to 3)",
     type=int,
@@ -167,6 +178,7 @@ def run_pipeline(
     triple_captain_week: int,
     bench_boost_week: int,
     chip_strategy: str,
+    risk_lambda: float,
     n_previous: int,
     no_current_season: bool,
     team_model: str,
@@ -267,6 +279,7 @@ def run_pipeline(
                 max_hit=max_hit,
                 allow_unused=allow_unused,
                 chip_strategy=chip_strategy,
+                risk_lambda=risk_lambda,
             )
             if not opt_ok:
                 msg = "Problem running optimization"
@@ -392,6 +405,7 @@ def run_optimize_squad(
     max_hit: int,
     allow_unused: bool,
     chip_strategy: str = "off",
+    risk_lambda: float = 0.8,
 ) -> bool:
     """
     Build the initial squad
@@ -411,6 +425,7 @@ def run_optimize_squad(
             max_total_hit=max_hit,
             allow_unused_transfers=allow_unused,
             chip_strategy=chip_strategy,
+            risk_lambda=risk_lambda,
         )
     return True
 

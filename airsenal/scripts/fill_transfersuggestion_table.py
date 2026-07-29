@@ -433,6 +433,7 @@ def resolve_auto_chip_gameweeks(
     season: str,
     tag: str,
     fpl_team_id: int,
+    risk_lambda: float = 0.8,
 ) -> tuple[dict, str | None]:
     """
     Resolve --chip_strategy auto into concrete chip_gameweeks.
@@ -465,6 +466,7 @@ def resolve_auto_chip_gameweeks(
             season=season,
             tag=tag,
             gameweeks=gameweeks,
+            risk_lambda=risk_lambda,
         )
     except Exception as e:
         # A chip-timing problem must never crash the whole optimisation
@@ -500,6 +502,7 @@ def run_optimization(
     is_replay: bool = False,  # for replaying seasons
     max_free_transfers: int = MAX_FREE_TRANSFERS,
     chip_strategy: str = "off",
+    risk_lambda: float = 0.8,
 ) -> tuple[Squad, dict[str, dict[str, int | list[int]]] | None]:
     """
     This is the actual main function that sets up the multiprocessing
@@ -517,6 +520,11 @@ def run_optimization(
     chip_timing.recommend_chip_timing to decide. Whenever any chip week is
     explicitly set, that manual choice always wins regardless of
     chip_strategy - see docs/chip_timing_spec.md §4.3.
+
+    risk_lambda is only used when chip_strategy == "auto"; it's forwarded to
+    recommend_chip_timing (via build_chip_report) - see
+    docs/chip_timing_spec.md §4.1's decision rule. Tuned by season replay,
+    see docs/chip_timing_spec.md §4.4.
     """
     if chip_gameweeks is None:
         chip_gameweeks = {}
@@ -597,7 +605,7 @@ def run_optimization(
     chip_report_text: str | None = None
     if chip_strategy == "auto" and not chip_weeks_manually_set(chip_gameweeks):
         chip_gameweeks, chip_report_text = resolve_auto_chip_gameweeks(
-            chip_gameweeks, gameweeks, season, tag, fpl_team_id
+            chip_gameweeks, gameweeks, season, tag, fpl_team_id, risk_lambda
         )
 
     # Get a dict of what chips we definitely or possibly will play
@@ -896,6 +904,17 @@ def main():
         default="off",
     )
     parser.add_argument(
+        "--risk_lambda",
+        help=(
+            "Only used when --chip_strategy=auto: how much to discount "
+            "future chip value relative to playing now (higher = more "
+            "conservative, prefers holding chips for later). See "
+            "docs/chip_timing_spec.md §4.1/§4.4."
+        ),
+        type=float,
+        default=0.8,
+    )
+    parser.add_argument(
         "--num_free_transfers", help="how many free transfers do we have", type=int
     )
     parser.add_argument(
@@ -1005,4 +1024,5 @@ def main():
             profile,
             is_replay=args.is_replay,
             chip_strategy=args.chip_strategy,
+            risk_lambda=args.risk_lambda,
         )
