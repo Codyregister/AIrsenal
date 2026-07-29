@@ -1677,7 +1677,14 @@ def get_last_complete_gameweek_in_db(
         select(Fixture)
         .where(
             Fixture.season == season,
-            Fixture.result.is_(None),
+            # NOTE: Fixture.result is a relationship, not a plain column -
+            # unlike a mapped_column, SQLAlchemy's relationship comparator
+            # doesn't implement .is_()/.is_not() (only ==/!=), so this must
+            # stay as `== None` (see
+            # https://github.com/alan-turing-institute/AIrsenal/commit/f51e6a0,
+            # which introduced a `NotImplementedError` regression here by
+            # changing this to `.is_(None)`).
+            Fixture.result == None,  # noqa: E711
             Fixture.gameweek.is_not(None),
         )
         .order_by(Fixture.gameweek)
