@@ -212,6 +212,21 @@ airsenal_run_optimization --weeks_ahead 3
 
 This will take a while, but should eventually provide a printout of the optimal transfer strategy, in addition to the teamsheet for the next match (including who to make captain, and the order of the substitutes). You can also optimise chip usage with the arguments ` --wildcard_week <GW>`, `--free_hit_week <GW>`, `--triple_captain_week <GW>` and `--bench_boost_week <GW>`, replacing `<GW>` with the gameweek you want to play the chip (or use `0` to try playing the chip in all gameweeks).
 
+#### Automatic chip timing
+
+Instead of manually specifying `--*_week` flags, you can pass `--chip_strategy {off,manual,auto}` (default `off`) to `airsenal_run_optimization` or `airsenal_run_pipeline`:
+- `off` (default): chips are never played automatically - identical to today's behaviour unless you also pass a `--*_week` flag.
+- `manual`: same as `off`, but documents that you intend to rely solely on the `--*_week` flags.
+- `auto`: uses `airsenal.framework.chip_timing.recommend_chip_timing` to weigh the points gained by playing each available chip now against the expected value of holding it for a better future gameweek (e.g. a double gameweek), and pins the chip to the optimiser's plan only when it's worth playing now. An explicit `--*_week` flag always overrides `auto`. Tune the risk/reward trade-off with `--risk_lambda` (default `0.8`; higher = more conservative about playing early).
+
+To see a standalone report of the estimated value of each available chip in every remaining gameweek, without changing any optimiser behaviour, run:
+
+```shell
+airsenal_chip_report
+```
+
+This prints a per-gameweek value table and a play-now-or-hold recommendation for each of the four chips (add `--json` for machine-readable output). See `docs/chip_timing_spec.md` for the full design, and `NOTES.md` for a summary of replay-validation results used to decide the `--chip_strategy` default.
+
 Note that `airsenal_run_optimization` should only be used for transfer suggestions after the season has started. If it's before the season has started and you want to generate a full squad for gameweek one you should instead use:
 
 ```shell

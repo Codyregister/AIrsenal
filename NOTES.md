@@ -165,6 +165,132 @@ Run `airsenal_run_optimization` (previously `run_airsenal_optimization`) to gene
 Starting XI, captain & subs
 
 Chips
+=====
+
+See `docs/chip_timing_spec.md` for the full design of the chip-timing feature (dataclasses,
+value estimators, decision rule, edge cases, acceptance criteria).
+
+### `chip_timing.py` module
+
+`airsenal/framework/chip_timing.py` decides *when* to play each chip (wildcard, free hit,
+bench boost, triple captain) by estimating its expected points gain in every remaining
+gameweek of its window (`get_chip_windows`), using the real prediction machinery for
+in-horizon gameweeks and a cheap team-model-based proxy for long-range ones, then comparing
+"play now" against a discounted, uncertainty-penalised best future gameweek
+(`recommend_chip_timing`). `get_double_blank_gameweeks` detects double/blank gameweeks from
+the `Fixture` table to flag them in the report.
+
+### `airsenal_chip_report` CLI
+
+`airsenal_chip_report` (`airsenal/scripts/chip_report.py`) prints a per-gameweek value table
+and a play-now-or-hold recommendation for every available chip, without changing any
+optimiser behaviour. Supports `--fpl_team_id`, `--season`, `--tag`, `--weeks_ahead`,
+`--risk_lambda`, and `--json` for machine-readable output.
+
+### `--chip_strategy` on `airsenal_run_optimization` / `airsenal_run_pipeline`
+
+`--chip_strategy {off,manual,auto}` (default **`off`**) controls how `chip_gameweeks` is
+decided when none of the `--wildcard_week`/`--free_hit_week`/`--triple_captain_week`/
+`--bench_boost_week` flags have been set explicitly (an explicit flag always wins,
+regardless of `--chip_strategy`):
+- `off`: never play a chip automatically - bit-identical to pre-chip-timing behaviour.
+- `manual`: same as `off`, exists so callers can be explicit they rely solely on the
+  `--*_week` flags.
+- `auto`: calls `chip_timing.recommend_chip_timing` and pins `chip_gameweeks[chip]` to
+  `best_gw` for every chip recommended `play_now=True` inside the optimisation horizon,
+  leaving the existing tree search to find the best transfers around it. Tuned by
+  `--risk_lambda` (default `0.8`).
+
+### Chip timing validation results (PR4, docs/chip_timing_spec.md §4.4)
+
+`airsenal_replay_season` supports the same `--chip_strategy`/`--risk_lambda` flags (plus
+`--wildcard_week` etc. for manually forcing "any week" chip weeks), so a past season can be
+replayed under `off` / `auto`, or the pre-feature "greedy" behaviour (`--chip_strategy
+manual` with all four `--*_week` flags set to `0`).
+
+**Honest summary of what was actually run and found** (numbers below are real, not
+estimated - see `docs/pr4_replay_validation_results.json` and
+`docs/pr4_replay_raw/*.json` for the raw replay output):
+
+- Season 2223/2324/2425 test DBs were built specifically for this validation (they are not
+  shipped with AIrsenal and are not part of this commit - see "how to reproduce" below).
+- **Scope actually completed**: season **2324**, gameweeks **1-4**, three configurations
+  (`off`, `greedy`, `auto` at `risk_lambda=0.8`), **one season only** - not the two seasons
+  originally targeted, and no `risk_lambda` grid, due to compute constraints hit during this
+  session (see below).
+- **Reduced fidelity, clearly labelled**: a full-fidelity attempt at `greedy` (which lets the
+  optimiser consider any of the four chips in any of the 3 horizon gameweeks, in
+  combination) blew up combinatorially - the tree search reached 308 candidate strategies
+  for a single gameweek, each involving a full GA squad rebuild (`num_iterations=100`) for
+  any branch touching wildcard/free hit, and was still <15% done after ~20 hours of CPU
+  time. The validation below instead uses `--weeks_ahead 2` (vs the production default 3),
+  `--max_opt_transfers 1` (vs 2), and `--num_iterations 15` (vs 100) for the transfer-tree
+  GA rebuilds, which cut the `greedy` tree to ~30-54 strategies/gameweek and made replay
+  tractable (~10-13 minutes/config for `off`/`greedy`). This is a genuine precision/speed
+  trade-off for replay only - it does **not** change any production default, and all three
+  configurations were run under the *same* reduced settings for a fair comparison.
+- **A known asymmetry**: `chip_timing.py`'s own wildcard/free-hit value **estimators**
+  (`estimate_wildcard_value`/`estimate_free_hit_value`, used only by `auto` to decide
+  whether a chip is worth playing) still ran their internal GA rebuild at the full
+  `num_iterations=100` (this constant isn't threaded from `--num_iterations`), so `auto`'s
+  chip-value estimation was full-precision even though the *actually-applied* squad (built
+  by `run_optimization`'s own tree search once a chip was pinned) used the reduced
+  `num_iterations=15`. This is a real confound when interpreting the results below - a
+  production `auto` run's applied wildcard squad would use the full `num_iterations=100`
+  and could reasonably be expected to score higher than what's shown here.
+
+**Results** (season 2324, GW1-4, reduced fidelity as above):
+
+| config | actual points | predicted points | chip(s) played | wall-clock |
+|---|---|---|---|---|
+| `off` | 268 | 230.0 | none | 590s |
+| `greedy` (today's pre-feature behaviour) | 260 | 231.1 | triple_captain (GW2) | 719s |
+| `auto`, λ=0.8 | 232 | 226.1 | wildcard (GW2) | 3861s (dominated by the full-precision chip estimators above) |
+
+**Interpretation and decision**: this does **not** meet the spec's acceptance criterion
+("replay of at least one past season shows `auto` ≥ greedy in total points") - `auto`
+scored lowest of the three in this run. Given the known GA-precision confound around
+`auto`'s wildcard choice, the small sample (4 gameweeks, 1 season, 1 `risk_lambda` value),
+and that `auto`'s single chip decision (playing wildcard in GW2) dominates the whole
+result, this is not strong evidence either way about the feature's real-world merit - but
+it is also not evidence *in favour* of flipping the default. Per the task brief's explicit
+instruction to only flip `--chip_strategy`'s default from `off` to `auto` if replay evidence
+supports it, **the default remains `off`**. A follow-up validation with full
+`num_iterations` (or with the estimators' constant properly threaded through so a reduced
+setting applies uniformly), a longer replay window (so a wildcard played early has time to
+pay off), a second season, and a small `risk_lambda` grid is needed before revisiting this
+decision - see `docs/chip_timing_spec.md` §4.4 for the original plan, most of which remains
+undone due to the compute cost discovered here.
+
+**How to reproduce**: rebuild a scratch AIrsenal DB with a few seasons of history (e.g.
+`airsenal_setup_initial_db --no_current_season --n_previous 3` under a season-appropriate
+`AIRSENAL_HOME`, or call `airsenal.scripts.fill_db_init.make_init_db` directly with an
+explicit season list - a replay of season `S` needs several seasons of results *before* `S`
+already loaded, or the team model has nothing to fit on for `S`'s GW1), then:
+
+```shell
+airsenal_replay_season --season 2324 --gameweek_start 1 --gameweek_end 4 \
+    --num_thread 1 --max_transfers 1 --num_iterations 15 --weeks_ahead 2 \
+    --chip_strategy off   # or: manual --wildcard_week 0 --free_hit_week 0 \
+                          #     --triple_captain_week 0 --bench_boost_week 0
+                          # or: auto --risk_lambda 0.8
+```
+
+`--num_thread 1` was used defensively, not just for speed: with `--num_thread` > 1, the
+JAX/numpyro-based team model (fit once per gameweek before predictions) leaves the process
+multi-threaded, and `multiprocessing`'s `fork` start method (which AIrsenal explicitly
+selects, see `multiprocessing_utils.set_multiprocessing_start_method`) is documented by
+numpyro/JAX to be unsafe after that - "`os.fork()` was called. `os.fork()` is incompatible
+with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock."
+During this validation, one `--num_thread 4` run of the player-prediction step did exactly
+that: 4 worker processes sat at 0% CPU for over an hour before being killed, while another
+earlier `--num_thread 4` run of the same code completed the same step in under two minutes
+- i.e. it's intermittent (classic fork-after-threading race condition), which makes it
+worse, not better, for unattended/production use. This is a pre-existing environment/
+dependency interaction, not something in this PR's scope to fix; treat
+`airsenal_replay_season`'s `--num_thread` default (4) as unsafe until it's investigated
+(e.g. switching to the `spawn` start method, which has its own costs) - `--num_thread 1`
+is the only setting confirmed safe across every run in this validation.
 
 ---
 # Old notes

@@ -1,0 +1,76 @@
+{
+  "chips": [
+    {
+      "id": 1,
+      "name": "wildcard",
+      "number": 1,
+      "start_event": 2,
+      "stop_event": 19,
+      "chip_type": "transfer",
+      "overrides": {}
+    },
+    {
+      "id": 2,
+      "name": "wildcard",
+      "number": 2,
+      "start_event": 20,
+      "stop_event": 38,
+      "chip_type": "transfer",
+      "overrides": {}
+    },
+    {
+      "id": 3,
+      "name": "freehit",
+      "number": 1,
+      "start_event": 2,
+      "stop_event": 19,
+      "chip_type": "transfer",
+      "overrides": {}
+    },
+    {
+      "id": 4,
+      "name": "freehit",
+      "number": 2,
+      "start_event": 20,
+      "stop_event": 38,
+      "chip_type": "transfer",
+      "overrides": {}
+    },
+    {
+      "id": 5,
+      "name": "bboost",
+      "number": 1,
+      "start_event": 1,
+      "stop_event": 19,
+      "chip_type": "team",
+      "overrides": {}
+    },
+    {
+      "id": 6,
+      "name": "bboost",
+      "number": 2,
+      "start_event": 20,
+      "stop_event": 38,
+      "chip_type": "team",
+      "overrides": {}
+    },
+    {
+      "id": 7,
+      "name": "3xc",
+      "number": 1,
+      "start_event": 1,
+      "stop_event": 19,
+      "chip_type": "team",
+      "overrides": {}
+    },
+    {
+      "id": 8,
+      "name": "3xc",
+      "number": 2,
+      "start_event": 20,
+      "stop_event": 38,
+      "chip_type": "team",
+      "overrides": {}
+    }
+  ]
+}

@@ -222,6 +222,26 @@ def get_baseline_strat(squad, gameweeks, tag, root_gw=None):
     """
     Create the strategy dict used by the optimisation for the baseline of making no
     transfers.
+
+    This is normally only used to score the baseline for the "Baseline Score:"
+    comparison printed alongside the optimiser's chosen strategy - but
+    save_baseline_score() also writes it out as a "strategy_*.json" file (with
+    the same naming convention as real tree-search strategies) whenever the
+    all-zero-transfers baseline would otherwise be excluded from the search
+    tree. That happens whenever a gameweek's chip is *forced* (chip_to_play
+    set, e.g. by --chip_strategy auto pinning a recommended chip - see
+    construct_chip_dict/resolve_auto_chip_gameweeks in
+    fill_transfersuggestion_table.py), since construct_chip_dict then removes
+    the "no transfer, no chip" branch entirely for that gameweek. If the
+    forced-chip strategies all score worse than doing nothing,
+    find_best_strat_from_json can end up picking *this* baseline dict as the
+    overall best strategy - so it must have the same shape as a real
+    tree-search strategy dict (points_hit/num_transfers/free_transfers/
+    discount_factor/bank), or downstream consumers (print_strat,
+    fill_suggestion_table, replay_season.py) crash with a KeyError. Since no
+    transfers are made, points_hit/num_transfers are always 0 here;
+    free_transfers isn't meaningfully tracked at this level so is also left
+    at 0 (only used for reporting, not for further calculation).
     """
     strat_dict = {
         "total_score": 0,
@@ -229,6 +249,11 @@ def get_baseline_strat(squad, gameweeks, tag, root_gw=None):
         "players_in": {},
         "players_out": {},
         "chips_played": {},
+        "points_hit": {},
+        "num_transfers": {},
+        "free_transfers": {},
+        "discount_factor": {},
+        "bank": {},
         "root_gw": root_gw,
     }
     for gw in gameweeks:
@@ -238,6 +263,11 @@ def get_baseline_strat(squad, gameweeks, tag, root_gw=None):
         strat_dict["players_in"][gw] = []
         strat_dict["players_out"][gw] = []
         strat_dict["chips_played"][gw] = None
+        strat_dict["points_hit"][gw] = 0
+        strat_dict["num_transfers"][gw] = 0
+        strat_dict["free_transfers"][gw] = 0
+        strat_dict["discount_factor"][gw] = get_discount_factor(root_gw, gw)
+        strat_dict["bank"][gw] = squad.budget
 
     return strat_dict
 

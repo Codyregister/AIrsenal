@@ -121,3 +121,6 @@ venv.bak/
 
 # editor config
 .vscode
+
+# Claude Code local state (worktrees, etc.)
+.claude/

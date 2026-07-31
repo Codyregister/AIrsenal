@@ -1,0 +1,50 @@
+{
+  "description": "PR4 replay validation results (docs/chip_timing_spec.md §4.4). Season 2324, GW1-4, off vs greedy vs auto chip strategies. Run at reduced fidelity (see notes) due to compute constraints - see NOTES.md 'Chip timing validation results' section for full caveats and honest interpretation.",
+  "settings": {
+    "season": "2324",
+    "gameweek_start": 1,
+    "gameweek_end": 4,
+    "num_thread": 1,
+    "max_opt_transfers": 1,
+    "num_iterations": 15,
+    "weeks_ahead": 2,
+    "note": "num_iterations=15 (vs production default 100) only reduces the GA population/generations used by run_optimization's own tree search (fill_initial_squad and any wildcard/free-hit branch actually applied by the winning strategy). It does NOT reduce chip_timing.py's own internal wildcard/free-hit value ESTIMATORS (estimate_wildcard_value/estimate_free_hit_value), which still ran at num_iterations=100 - this asymmetry is a known confound, see NOTES.md."
+  },
+  "results": [
+    {
+      "config": "off",
+      "chip_strategy": "off",
+      "total_actual_points": 268,
+      "total_expected_points": 230.02,
+      "chips_played": {},
+      "elapsed_seconds": 590.3
+    },
+    {
+      "config": "greedy",
+      "chip_strategy": "manual",
+      "chip_gameweeks_requested": {
+        "wildcard": 0,
+        "free_hit": 0,
+        "triple_captain": 0,
+        "bench_boost": 0
+      },
+      "total_actual_points": 260,
+      "total_expected_points": 231.07,
+      "chips_played": {
+        "2": "triple_captain"
+      },
+      "elapsed_seconds": 719.0
+    },
+    {
+      "config": "auto",
+      "chip_strategy": "auto",
+      "risk_lambda": 0.8,
+      "total_actual_points": 232,
+      "total_expected_points": 226.15,
+      "chips_played": {
+        "2": "wildcard"
+      },
+      "elapsed_seconds": 3861.4
+    }
+  ]
+}
