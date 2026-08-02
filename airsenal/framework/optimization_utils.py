@@ -19,6 +19,7 @@ from airsenal.framework.squad import Squad, get_current_squad_from_api
 from airsenal.framework.transaction_utils import add_transaction
 from airsenal.framework.utils import (
     CURRENT_SEASON,
+    MAX_FREE_TRANSFERS,
     NEXT_GAMEWEEK,
     fetcher,
     get_player,
@@ -28,7 +29,6 @@ from airsenal.framework.utils import (
 positions = ["FWD", "MID", "DEF", "GK"]  # front-to-back
 
 DEFAULT_SUB_WEIGHTS = {"GK": 0.03, "Outfield": (0.65, 0.3, 0.1)}
-MAX_FREE_TRANSFERS = 5  # changed in 24/25 season (not accounted for in replay season)
 
 
 def check_tag_valid(pred_tag, gameweek_range, season=CURRENT_SEASON, dbsession=session):

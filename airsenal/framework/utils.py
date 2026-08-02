@@ -38,6 +38,11 @@ from airsenal.framework.season import CURRENT_SEASON
 
 fetcher = FPLDataFetcher()  # in global scope so it can keep cached data
 
+# Maximum number of free transfers that can be banked. Changed from 2 to 5 in the
+# 24/25 season. Defined here (rather than in optimization_utils) so it can be used
+# by get_free_transfers without a circular import.
+MAX_FREE_TRANSFERS = 5
+
 
 @lru_cache(1)
 def get_max_gameweek(season: str = CURRENT_SEASON, dbsession: Session = session) -> int:
@@ -474,11 +479,16 @@ def get_free_transfers(
         msg = "Gameweek must be specified for historical data"
         raise ValueError(msg)
     gameweek = gameweek or NEXT_GAMEWEEK
+    # Accumulate free transfers gameweek by gameweek: each week we gain one extra
+    # free transfer (minus any transfers made), banking up to MAX_FREE_TRANSFERS.
+    # This mirrors calc_free_transfers in optimization_utils, and accounts for the
+    # 24/25 rule change from a maximum of 2 to 5 banked free transfers (which the
+    # previous implementation here did not, so replays were capped at 2).
     for prev_gw in range(starting_gw + 1, gameweek):
-        if prev_gw not in gw_transactions:
-            num_free_transfers = 2
-        elif gw_transactions[prev_gw] >= 2:
-            num_free_transfers = 1
+        transfers_made = gw_transactions.get(prev_gw, 0)
+        num_free_transfers = max(
+            1, min(MAX_FREE_TRANSFERS, num_free_transfers + 1 - transfers_made)
+        )
 
     return num_free_transfers
 
