@@ -407,7 +407,21 @@ def print_team_for_next_gw(
     for pidout in strat["players_out"][str(next_gw)]:
         t.remove_player(pidout)
     for pidin in strat["players_in"][str(next_gw)]:
-        t.add_player(pidin)
+        # As in get_squad_from_transactions (optimization_utils.py): within an
+        # individual transfer we can violate the budget and squad constraints,
+        # as long as the final squad for that gameweek obeys them. The
+        # optimiser already chose and committed to this transfer during its
+        # search - re-validating budget/team-count here can spuriously reject
+        # it due to sale-price rounding differences between the search's
+        # internal bookkeeping and this reconstruction, silently leaving the
+        # squad incomplete (see get_expected_points -> optimize_lineup below).
+        added = t.add_player(pidin, check_budget=False, check_team=False)
+        if not added:
+            msg = (
+                f"Failed to reconstruct squad for GW{next_gw}: could not add "
+                f"player {pidin} (duplicate or position limit)"
+            )
+            raise RuntimeError(msg)
     tag = get_latest_prediction_tag(season=season)
     t.get_expected_points(next_gw, tag)
     print("\n--------------------------------")
