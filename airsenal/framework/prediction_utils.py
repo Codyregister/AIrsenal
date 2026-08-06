@@ -273,7 +273,11 @@ def get_player_history_df(
             ] * (max_matches_per_player - row_count)
 
     df = pd.DataFrame(player_data, columns=col_names)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    # utc=True: fixture dates for older seasons are a mix of tz-aware and
+    # tz-naive strings, which pandas 2.x refuses to parse together
+    # otherwise. Only ever consumed via .dt.date below, so the timezone
+    # itself doesn't matter - just need a single consistent parse.
+    df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
     df.reset_index(drop=True, inplace=True)
 
     return df
