@@ -8,6 +8,9 @@ run_validation.py) for a quick view of:
   - the current squad and next-gameweek predictions
   - replay validation results (off/greedy/auto chip-strategy comparison,
     read from run_validation.py's JSON output files)
+  - price change momentum (see airsenal/framework/price_change.py - a
+    ranking, not a calibrated rise/fall prediction, see that module's
+    docstring for why)
 
 Run with: uv run python3 dashboard_app.py
 """
@@ -22,6 +25,7 @@ from flask import Flask, render_template_string
 from sqlalchemy import select
 
 from airsenal.framework.optimization_utils import get_starting_squad
+from airsenal.framework.price_change import get_price_momentum, status_label
 from airsenal.framework.schema import Absence, Fixture, TransferSuggestion, session
 from airsenal.framework.utils import (
     CURRENT_SEASON,
@@ -190,6 +194,21 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
 </table>
 {% endif %}
 
+<h2>Price change momentum</h2>
+<p class="muted">Net transfers since the last snapshot, ranked - a <b>momentum indicator, not a calibrated rise/fall prediction</b>. Backtesting a simple threshold against real historical data found weak precision (see airsenal/framework/price_change.py's docstring) - treat this as "who's moving", not "who will change price".</p>
+{% if price_momentum_error %}
+<p class="err">{{ price_momentum_error }}</p>
+{% elif not price_movers %}
+<p class="muted">No momentum data yet - needs at least two daily snapshots (see tools/price_change_snapshot_run.sh, runs every 4 hours). Check back once that's been running for a day or more.</p>
+{% else %}
+<table>
+<tr><th>Player</th><th>Price</th><th>Net transfers</th><th>Momentum</th><th>Owned by</th><th>Status</th></tr>
+{% for p in price_movers %}
+<tr><td>{{ p.name }}{% if p.in_squad %} <span class="tag play">SQUAD</span>{% endif %}</td><td>&pound;{{ p.price / 10 }}m</td><td>{{ "%+d"|format(p.net_transfers_today) }}</td><td>{{ "%+.2f"|format(p.momentum_pct) }}%</td><td>{{ p.selected_by_percent }}%</td><td class="muted">{{ p.status }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
 <h2>Replay validation results</h2>
 {% if not replay_by_season %}
 <p class="muted">No replay results found yet.</p>
@@ -320,6 +339,34 @@ def _load_upcoming_fixtures(squad_teams, season, next_gw, n_weeks=5):
         if f.away_team in by_team:
             by_team[f.away_team].setdefault(f.gameweek, []).append(f"{f.home_team} (A)")
     return by_team, gw_range
+
+
+def _load_price_movers(season, squad_player_ids, dbsession, top_n=10):
+    """Top N risers and fallers by momentum (see get_price_momentum), each
+    flagged with whether they're in the current squad."""
+    results = get_price_momentum(season=season, dbsession=dbsession)
+    if not results:
+        return []
+    squad_ids = set(squad_player_ids)
+    movers = results[:top_n] + list(reversed(results[-top_n:]))
+    seen = set()
+    out = []
+    for r in movers:
+        if r.player_id in seen:
+            continue
+        seen.add(r.player_id)
+        out.append(
+            {
+                "name": get_player_name(r.player_id, dbsession),
+                "price": r.price,
+                "net_transfers_today": r.net_transfers_today,
+                "momentum_pct": r.momentum_pct,
+                "selected_by_percent": r.selected_by_percent,
+                "status": status_label(r.momentum_pct),
+                "in_squad": r.player_id in squad_ids,
+            }
+        )
+    return sorted(out, key=lambda p: p["momentum_pct"], reverse=True)
 
 
 def _load_replay_results():
@@ -516,6 +563,15 @@ def index():
             )
         except (ValueError, RuntimeError):
             upcoming_fixtures, fixture_gameweeks = {}, []
+    else:
+        squad_player_ids = []
+
+    price_movers = []
+    price_momentum_error = None
+    try:
+        price_movers = _load_price_movers(CURRENT_SEASON, squad_player_ids, session)
+    except (ValueError, RuntimeError) as e:
+        price_momentum_error = str(e)
 
     replay_by_season, replay_combined = _load_replay_results()
     replay_configs = sorted(
@@ -550,6 +606,8 @@ def index():
         absences=absences,
         upcoming_fixtures=upcoming_fixtures,
         fixture_gameweeks=fixture_gameweeks,
+        price_movers=price_movers,
+        price_momentum_error=price_momentum_error,
     )
 
 
