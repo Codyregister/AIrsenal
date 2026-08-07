@@ -88,9 +88,30 @@ class SquadOpt:
         if remove_zero:
             self._remove_zero_pts()
         self.n_available_players = len(self.players)
+        self._check_positions_available()
 
         # Setup DEAP toolbox
         self._setup_deap()
+
+    def _check_positions_available(self):
+        """Raise a clear error if a position we need to fill has no eligible
+        players at all (e.g. every player in that position had zero
+        predicted points across `gw_range` - can happen on a blank
+        gameweek). Left unchecked, this produces invalid (low > up)
+        mutation bounds that DEAP fails on deep inside the GA with a
+        confusing `ValueError: empty range for randrange()`.
+        """
+        for pos in self.positions:
+            if self.players_per_position[pos] <= 0:
+                continue
+            pos_min, pos_max = self.position_idx[pos]
+            if pos_max < pos_min:
+                msg = (
+                    f"No players with non-zero predicted points available for "
+                    f"position {pos} in gameweek range {self.gw_range} "
+                    f"(season {self.season}). Cannot build a squad."
+                )
+                raise ValueError(msg)
 
     def _setup_deap(self):
         """Setup DEAP genetic algorithm components."""
@@ -210,25 +231,27 @@ class SquadOpt:
 
     def _remove_zero_pts(self):
         """Exclude players with zero predicted points."""
-        players: list[Player] = []
-        # change_idx stores the indices of where the player positions change in the new
-        # player list
-        change_idx = [0]
-        last_pos = self.positions[0]
+        players_by_position: dict[str, list[Player]] = {
+            pos: [] for pos in self.positions
+        }
         for p in self.players:
             gw_pts = get_predicted_points_for_player(p, self.tag, season=self.season)
             total_pts = sum(pts for gw, pts in gw_pts.items() if gw in self.gw_range)
             if total_pts > 0:
-                if p.position(self.season) != last_pos:
-                    change_idx.append(len(players))
-                    last_pos = p.position(self.season)
-                players.append(p)
-        change_idx.append(len(players))
+                players_by_position[p.position(self.season)].append(p)
 
-        position_idx = {
-            self.positions[i - 1]: (change_idx[i - 1], change_idx[i] - 1)
-            for i in range(1, len(change_idx))
-        }
+        # Rebuild players list and position_idx position-by-position (rather than
+        # inferring position boundaries from consecutive list entries) so a
+        # position left with zero eligible players still gets a (correct, if
+        # empty) entry instead of silently shifting every subsequent position's
+        # index range along by one, or dropping the last position's entry
+        # entirely.
+        players: list[Player] = []
+        position_idx = {}
+        for pos in self.positions:
+            start = len(players)
+            players.extend(players_by_position[pos])
+            position_idx[pos] = (start, len(players) - 1)
 
         self.players = players
         self.position_idx = position_idx

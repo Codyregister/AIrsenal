@@ -78,26 +78,48 @@ unrelated real bugs were found and fixed along the way (see git log for
 squad-reconstruction failure on budget-edge transfers, and a stale
 2-vs-5 free-transfer banking cap.
 
-- [ ] **Blank-gameweek crash in team-model fitting**: `get_result_dict`
-      (`airsenal/framework/bpl_interface.py:70`) does
+- [x] **Blank-gameweek crash in team-model fitting** — fixed 2026-08-07.
+      `get_result_dict` (`airsenal/framework/bpl_interface.py`) did
       `np.array([fixture dates for this gameweek]).min()` with no guard for zero
-      fixtures. A genuine blank gameweek (confirmed: season 2223/2022-23, likely
-      World Cup fixture disruption) makes this array empty and crashes with
-      `ValueError: zero-size array to reduction operation minimum which has no
-      identity`. Needs a fallback reference date (e.g. search forward/backward to
-      the nearest non-blank gameweek) instead of assuming the target gameweek
-      always has dated fixtures.
-- [ ] **Missing position crashes squad optimisation**: `SquadOpt._remove_zero_pts`
-      (`airsenal/framework/optimization_squad.py`) builds `position_idx` by
-      tracking where consecutive players' positions change after filtering out
-      zero-predicted-points players — if *every* player in a position (e.g. all
-      DEF) ends up filtered out for a gameweek range, that position never gets a
-      `position_idx` entry, and `_get_mutation_bounds`/`_create_individual` then
-      crash with `KeyError` on that position. Also confirmed on season 2223.
-      Separately, when this happens inside a `multiprocessing.Process` tree-search
-      worker, the *parent* process doesn't notice the child died and hangs
-      indefinitely (observed: ~10 hours, no progress) instead of erroring — worth
-      a timeout/liveness check on worker processes regardless of this specific bug.
+      fixtures, crashing with `ValueError: zero-size array to reduction
+      operation minimum which has no identity` on a genuine blank gameweek
+      (confirmed: season 2223/2022-23, World Cup fixture disruption). Added
+      `_get_reference_date()`, which falls back to the nearest surrounding
+      gameweek's earliest dated fixture (searching outward both directions),
+      raising a clear `ValueError` only if no dated fixtures exist anywhere
+      nearby. Regression tests in `airsenal/tests/test_bpl_interface.py`.
+- [x] **Missing position crashes squad optimisation** — fixed 2026-08-07.
+      `SquadOpt._remove_zero_pts` (`airsenal/framework/optimization_squad.py`)
+      built `position_idx` by inferring boundaries from where consecutive
+      players' positions changed after filtering out zero-predicted-points
+      players — if *every* player in a position (e.g. all DEF) got filtered out
+      for a gameweek range, that position silently stole another position's
+      index range (or dropped the last position's entry entirely), and
+      `_get_mutation_bounds`/`_create_individual` crashed with `KeyError` or a
+      cryptic DEAP `ValueError: empty range for randrange()`. Rewrote it to
+      build `players`/`position_idx` position-by-position instead of by
+      inference, and added `SquadOpt._check_positions_available()` to fail
+      fast with a clear message if a *required* position ends up with zero
+      eligible players. Regression tests in `test_optimization_squad.py`.
+
+      Separately, this crash used to hang the whole tree-search worker pool:
+      when it happened inside a `multiprocessing.Process` worker in
+      `fill_transfersuggestion_table.py`, the crashed worker died silently,
+      and every *other* worker then spun forever (`time.sleep(5)` loop)
+      because their termination check (`is_finished`) compared output files
+      on disk against a precomputed expected total that could never be
+      reached once that node's subtree was abandoned — observed hanging
+      ~10 hours with no progress. Fixed by wrapping each tree node's
+      processing in a try/except (log and abandon that node's subtree
+      instead of dying) and replacing the static-total check with a shared
+      "outstanding work" counter (`SharedCounter`, incremented/decremented
+      around every `queue.put`/node resolution) so termination is provable
+      regardless of any individual node failing. Regression tests in
+      `airsenal/tests/test_optimize_worker_resilience.py`.
+
+      Not yet done: re-running the abandoned 3rd replay season (2223) now
+      that both crashes are fixed, to see if it changes the λ=0.5
+      chip-timing conclusion above.
 
 ## 2. Optimisation engine
 

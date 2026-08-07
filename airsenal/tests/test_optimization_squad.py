@@ -4,7 +4,26 @@ Tests for the DEAP-based optimization implementation.
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from airsenal.framework.optimization_squad import SquadOpt
+
+
+def _make_players_by_position(counts: dict[str, int]) -> list[Mock]:
+    """Build mock players (with player_id/position/team/price) for the given
+    {position: count} mapping, positions ordered GK, DEF, MID, FWD."""
+    players = []
+    i = 0
+    for pos in ("GK", "DEF", "MID", "FWD"):
+        for _ in range(counts.get(pos, 0)):
+            player = Mock()
+            player.player_id = f"player_{i}"
+            player.position.return_value = pos
+            player.team.return_value = f"Team {i % 10}"
+            player.price.return_value = 50
+            players.append(player)
+            i += 1
+    return players
 
 
 def test_deap_class():
@@ -248,3 +267,80 @@ def test_deap_optimization_creates_valid_squad():
                 assert best_fitness > 0, (
                     "Optimization should find a solution with positive fitness"
                 )
+
+
+def test_remove_zero_pts_raises_clear_error_when_position_fully_empty():
+    """Regression test for a real 2022-23 (2223) blank-gameweek crash: if
+    every player in a required position has zero predicted points across
+    gw_range (e.g. that position's teams all have a blank fixture), SquadOpt
+    used to silently miscompute position_idx and crash later with a
+    confusing KeyError/empty-range error deep inside DEAP. It should now
+    fail fast with a clear message instead.
+    """
+    players = _make_players_by_position({"GK": 2, "DEF": 3, "MID": 3, "FWD": 2})
+
+    with patch(
+        "airsenal.framework.optimization_squad.list_players"
+    ) as mock_list_players:
+        mock_list_players.side_effect = lambda position=None, **kwargs: [
+            p for p in players if p.position() == position
+        ]
+
+        def mock_points(player, tag, season=None, dbsession=None):
+            # every DEF player blanks (zero points) for this gw_range
+            if player.position() == "DEF":
+                return {1: 0.0, 2: 0.0}
+            return {1: 4.0, 2: 3.0}
+
+        with (
+            patch(
+                "airsenal.framework.optimization_squad.get_predicted_points_for_player",
+                side_effect=mock_points,
+            ),
+            pytest.raises(ValueError, match="DEF"),
+        ):
+            SquadOpt(
+                gw_range=[1, 2],
+                tag="test_tag",
+                players_per_position={"GK": 2, "DEF": 3, "MID": 3, "FWD": 2},
+            )
+
+
+def test_remove_zero_pts_keeps_position_idx_aligned_when_not_required():
+    """If a position is fully filtered out but the squad doesn't actually
+    need any players from it (players_per_position[pos] == 0), SquadOpt
+    should not raise, and the surviving positions' index ranges should still
+    point at the right players (not shifted/misaligned by the dropped
+    position) - this is the core bug behind the KeyError: position_idx used
+    to be built by inferring boundaries from consecutive same/different
+    positions, which broke whenever a whole position vanished.
+    """
+    players = _make_players_by_position({"GK": 2, "DEF": 3, "MID": 3, "FWD": 2})
+
+    with patch(
+        "airsenal.framework.optimization_squad.list_players"
+    ) as mock_list_players:
+        mock_list_players.side_effect = lambda position=None, **kwargs: [
+            p for p in players if p.position() == position
+        ]
+
+        def mock_points(player, tag, season=None, dbsession=None):
+            if player.position() == "DEF":
+                return {1: 0.0}
+            return {1: 4.0}
+
+        with patch(
+            "airsenal.framework.optimization_squad.get_predicted_points_for_player",
+            side_effect=mock_points,
+        ):
+            optimizer = SquadOpt(
+                gw_range=[1],
+                tag="test_tag",
+                players_per_position={"GK": 2, "DEF": 0, "MID": 3, "FWD": 2},
+            )
+
+    assert optimizer.position_idx["DEF"][1] < optimizer.position_idx["DEF"][0]
+    for pos in ("GK", "MID", "FWD"):
+        pos_min, pos_max = optimizer.position_idx[pos]
+        for idx in range(pos_min, pos_max + 1):
+            assert optimizer.players[idx].position() == pos

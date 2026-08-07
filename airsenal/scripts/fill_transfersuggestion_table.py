@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 import warnings
 from collections.abc import Callable
 from multiprocessing import Process, Queue
@@ -33,6 +34,7 @@ from tqdm import TqdmWarning, tqdm
 from airsenal.framework.env import AIRSENAL_HOME
 from airsenal.framework.multiprocessing_utils import (
     CustomQueue,
+    SharedCounter,
     set_multiprocessing_start_method,
 )
 from airsenal.framework.optimization_transfers import make_best_transfers
@@ -66,28 +68,14 @@ CHIP_STRATEGIES = ("auto", "manual", "off")
 OUTPUT_DIR = os.path.join(AIRSENAL_HOME, "airsopt")
 
 
-def is_finished(final_expected_num: int) -> bool:
-    """
-    Count the number of json files in the output directory, and see if the number
-    matches the final expected number, which should be pre-calculated by the
-    count_expected_points function based on the number of weeks optimising for, chips
-    available and other constraints.
-    Return True if output files are all there, False otherwise.
-    """
-
-    # count the json files in the output dir
-    json_count = len(os.listdir(OUTPUT_DIR))
-    return json_count == final_expected_num
-
-
 def optimize(
     queue: Queue,
     pid: Process,
-    num_expected_outputs: int,
     gameweek_range: list[int],
     season: str,
     pred_tag: str,
     chips_gw_dict: dict,
+    outstanding: SharedCounter,
     max_total_hit: int | None = None,
     allow_unused_transfers: bool = False,
     max_transfers: int = 2,
@@ -102,6 +90,15 @@ def optimize(
     pid is the Process that will execute this func,
     gameweeks will be a list of gameweeks to consider,
     season and prediction_tag are hopefully self-explanatory.
+    outstanding is a counter, shared across all worker processes, of tree
+    nodes that have been queued but not yet fully resolved (into either a
+    finished leaf, or its own children being queued). Workers exit once the
+    queue is empty and outstanding is zero - i.e. there is provably no more
+    work anywhere, including work a crashed sibling process failed to
+    produce. This is more robust than comparing the number of output files
+    on disk to a precomputed expected total, which can never be reached (and
+    so hangs every other worker forever) if a node's subtree is abandoned
+    because that node's optimization raised an exception.
 
     The rest of the parameters needed for prediction are from the queue.
 
@@ -119,152 +116,212 @@ def optimize(
         if queue.qsize() > 0:
             status = queue.get()
         else:
-            if is_finished(num_expected_outputs):
+            if outstanding.value <= 0:
                 break
             time.sleep(5)
             continue
 
-        # now assume we have set of parameters to do an optimization
-        # from the queue.
-
-        # turn on the profiler if requested
-        if profile:
-            profiler = cProfile.Profile()
-            profiler.enable()
-        else:
-            profiler = None
-
-        (
-            num_transfers,
-            free_transfers,
-            hit_so_far,
-            hit_this_gw,
-            squad,
-            strat_dict,
-            sid,
-        ) = status
-        # num_transfers will be 0, 1, 2, OR 'W' or 'F', OR 'T0', T1', 'T2',
-        # OR 'B0', 'B1', or 'B2' (the latter six represent triple captain or
-        # bench boost along with 0, 1, or 2 transfers).
-
-        # sid (status id) is just a string e.g. "0-0-2" representing how many
-        # transfers to be made in each gameweek.
-        # Only exception is the root node, where sid is "starting" - this
-        # node only exists to add children to the queue.
-
-        if sid == "starting":
-            sid = ""
-            depth = 0
-            strat_dict["total_score"] = 0
-            strat_dict["points_per_gw"] = {}
-            strat_dict["free_transfers"] = {}
-            strat_dict["num_transfers"] = {}
-            strat_dict["points_hit"] = {}
-            strat_dict["discount_factor"] = {}
-            strat_dict["players_in"] = {}
-            strat_dict["players_out"] = {}
-            strat_dict["chips_played"] = {}
-            strat_dict["bank"] = {}
-            new_squad = squad
-            gw = gameweek_range[0] - 1
-            strat_dict["root_gw"] = gameweek_range[0]
-        else:
-            if len(sid) > 0:
-                sid += "-"
-            sid += str(num_transfers)
-            if resetter is not None:
-                resetter(pid, sid)
-
-            # work out what gameweek we're in and how far down the tree we are.
-            depth = len(strat_dict["points_per_gw"])
-
-            # gameweeks from this point in strategy to end of window
-            gameweeks = gameweek_range[depth:]
-
-            # upcoming gameweek:
-            gw = gameweeks[0]
-            root_gw = strat_dict["root_gw"]
-
-            # check whether we're playing a chip this gameweek
-            if isinstance(num_transfers, str):
-                if num_transfers.startswith("T"):
-                    strat_dict["chips_played"][gw] = "triple_captain"
-                elif num_transfers.startswith("B"):
-                    strat_dict["chips_played"][gw] = "bench_boost"
-                elif num_transfers == "W":
-                    strat_dict["chips_played"][gw] = "wildcard"
-                elif num_transfers == "F":
-                    strat_dict["chips_played"][gw] = "free_hit"
-            else:
-                strat_dict["chips_played"][gw] = None
-
-            # calculate best transfers to make this gameweek (to maximise points across
-            # remaining gameweeks)
-            num_increments_for_updater = get_num_increments(
-                num_transfers, num_iterations
-            )
-            increment = 100 / num_increments_for_updater
-            new_squad, transfers, points = make_best_transfers(
-                num_transfers,
-                squad,
-                pred_tag,
-                gameweeks,
-                root_gw,
+        try:
+            _process_strategy_node(
+                status,
+                queue,
+                pid,
+                gameweek_range,
                 season,
-                num_iterations,
-                (updater, increment, pid) if updater is not None else None,
-            )
-
-            discount_factor = get_discount_factor(root_gw, gw)
-            points -= hit_this_gw * discount_factor
-            strat_dict["total_score"] += points
-            strat_dict["points_per_gw"][gw] = points
-            strat_dict["free_transfers"][gw] = free_transfers
-            strat_dict["num_transfers"][gw] = num_transfers
-            strat_dict["points_hit"][gw] = hit_this_gw
-            strat_dict["discount_factor"][gw] = discount_factor
-            strat_dict["players_in"][gw] = transfers["in"]
-            strat_dict["players_out"][gw] = transfers["out"]
-            strat_dict["bank"][gw] = new_squad.budget
-            depth += 1
-
-        if depth >= len(gameweek_range):
-            with open(
-                os.path.join(OUTPUT_DIR, f"strategy_{pred_tag}_{sid}.json"),
-                "w",
-            ) as outfile:
-                json.dump(strat_dict, outfile)
-            # call function to update the main progress bar
-            if updater is not None:
-                updater()
-
-            if profile and profiler is not None:
-                profiler.dump_stats(f"process_strat_{pred_tag}_{sid}.pstat")
-
-        else:
-            # add children to the queue
-            strategies = next_week_transfers(
-                (free_transfers, hit_so_far, strat_dict),
+                pred_tag,
+                chips_gw_dict,
+                outstanding,
                 max_total_hit=max_total_hit,
                 allow_unused_transfers=allow_unused_transfers,
-                max_opt_transfers=max_transfers,
-                chips=chips_gw_dict[gw + 1],
+                max_transfers=max_transfers,
+                num_iterations=num_iterations,
+                updater=updater,
+                resetter=resetter,
+                profile=profile,
                 max_free_transfers=max_free_transfers,
             )
-            for strat in strategies:
-                num_transfers, free_transfers, hit_so_far, hit_this_gw = strat
+        except Exception:
+            # Don't let one bad tree node (e.g. a genuine blank-gameweek edge
+            # case with no eligible players for some position) silently kill
+            # this worker and leave every other worker spinning forever
+            # waiting for output that will never come - log it clearly and
+            # move on. This node's subtree is abandoned (no children queued,
+            # no output written for it), which outstanding accounts for via
+            # the decrement below.
+            traceback.print_exc()
+            print(
+                f"[optimize worker {pid}] abandoning strategy node after error "
+                "(see traceback above)",
+                file=sys.stderr,
+            )
+            outstanding.increment(-1)
 
-                queue.put(
-                    (
-                        num_transfers,
-                        free_transfers,
-                        hit_so_far,
-                        hit_this_gw,
-                        new_squad,
-                        strat_dict,
-                        sid,
-                    )
+
+def _process_strategy_node(
+    status,
+    queue: Queue,
+    pid: Process,
+    gameweek_range: list[int],
+    season: str,
+    pred_tag: str,
+    chips_gw_dict: dict,
+    outstanding: SharedCounter,
+    max_total_hit: int | None = None,
+    allow_unused_transfers: bool = False,
+    max_transfers: int = 2,
+    num_iterations: int = 100,
+    updater: Callable | None = None,
+    resetter: Callable | None = None,
+    profile: bool = False,
+    max_free_transfers: int = MAX_FREE_TRANSFERS,
+) -> None:
+    """Process a single tree node taken off the queue: either write a
+    finished leaf strategy to disk, or queue its children. Split out from
+    `optimize` purely so that function can wrap this in a single try/except.
+    """
+    # turn on the profiler if requested
+    if profile:
+        profiler = cProfile.Profile()
+        profiler.enable()
+    else:
+        profiler = None
+
+    (
+        num_transfers,
+        free_transfers,
+        hit_so_far,
+        hit_this_gw,
+        squad,
+        strat_dict,
+        sid,
+    ) = status
+    # num_transfers will be 0, 1, 2, OR 'W' or 'F', OR 'T0', T1', 'T2',
+    # OR 'B0', 'B1', or 'B2' (the latter six represent triple captain or
+    # bench boost along with 0, 1, or 2 transfers).
+
+    # sid (status id) is just a string e.g. "0-0-2" representing how many
+    # transfers to be made in each gameweek.
+    # Only exception is the root node, where sid is "starting" - this
+    # node only exists to add children to the queue.
+
+    if sid == "starting":
+        sid = ""
+        depth = 0
+        strat_dict["total_score"] = 0
+        strat_dict["points_per_gw"] = {}
+        strat_dict["free_transfers"] = {}
+        strat_dict["num_transfers"] = {}
+        strat_dict["points_hit"] = {}
+        strat_dict["discount_factor"] = {}
+        strat_dict["players_in"] = {}
+        strat_dict["players_out"] = {}
+        strat_dict["chips_played"] = {}
+        strat_dict["bank"] = {}
+        new_squad = squad
+        gw = gameweek_range[0] - 1
+        strat_dict["root_gw"] = gameweek_range[0]
+    else:
+        if len(sid) > 0:
+            sid += "-"
+        sid += str(num_transfers)
+        if resetter is not None:
+            resetter(pid, sid)
+
+        # work out what gameweek we're in and how far down the tree we are.
+        depth = len(strat_dict["points_per_gw"])
+
+        # gameweeks from this point in strategy to end of window
+        gameweeks = gameweek_range[depth:]
+
+        # upcoming gameweek:
+        gw = gameweeks[0]
+        root_gw = strat_dict["root_gw"]
+
+        # check whether we're playing a chip this gameweek
+        if isinstance(num_transfers, str):
+            if num_transfers.startswith("T"):
+                strat_dict["chips_played"][gw] = "triple_captain"
+            elif num_transfers.startswith("B"):
+                strat_dict["chips_played"][gw] = "bench_boost"
+            elif num_transfers == "W":
+                strat_dict["chips_played"][gw] = "wildcard"
+            elif num_transfers == "F":
+                strat_dict["chips_played"][gw] = "free_hit"
+        else:
+            strat_dict["chips_played"][gw] = None
+
+        # calculate best transfers to make this gameweek (to maximise points across
+        # remaining gameweeks)
+        num_increments_for_updater = get_num_increments(num_transfers, num_iterations)
+        increment = 100 / num_increments_for_updater
+        new_squad, transfers, points = make_best_transfers(
+            num_transfers,
+            squad,
+            pred_tag,
+            gameweeks,
+            root_gw,
+            season,
+            num_iterations,
+            (updater, increment, pid) if updater is not None else None,
+        )
+
+        discount_factor = get_discount_factor(root_gw, gw)
+        points -= hit_this_gw * discount_factor
+        strat_dict["total_score"] += points
+        strat_dict["points_per_gw"][gw] = points
+        strat_dict["free_transfers"][gw] = free_transfers
+        strat_dict["num_transfers"][gw] = num_transfers
+        strat_dict["points_hit"][gw] = hit_this_gw
+        strat_dict["discount_factor"][gw] = discount_factor
+        strat_dict["players_in"][gw] = transfers["in"]
+        strat_dict["players_out"][gw] = transfers["out"]
+        strat_dict["bank"][gw] = new_squad.budget
+        depth += 1
+
+    if depth >= len(gameweek_range):
+        with open(
+            os.path.join(OUTPUT_DIR, f"strategy_{pred_tag}_{sid}.json"),
+            "w",
+        ) as outfile:
+            json.dump(strat_dict, outfile)
+        # call function to update the main progress bar
+        if updater is not None:
+            updater()
+
+        if profile and profiler is not None:
+            profiler.dump_stats(f"process_strat_{pred_tag}_{sid}.pstat")
+
+    else:
+        # add children to the queue
+        strategies = next_week_transfers(
+            (free_transfers, hit_so_far, strat_dict),
+            max_total_hit=max_total_hit,
+            allow_unused_transfers=allow_unused_transfers,
+            max_opt_transfers=max_transfers,
+            chips=chips_gw_dict[gw + 1],
+            max_free_transfers=max_free_transfers,
+        )
+        for strat in strategies:
+            num_transfers, free_transfers, hit_so_far, hit_this_gw = strat
+
+            outstanding.increment(1)
+            queue.put(
+                (
+                    num_transfers,
+                    free_transfers,
+                    hit_so_far,
+                    hit_this_gw,
+                    new_squad,
+                    strat_dict,
+                    sid,
                 )
+            )
+
+    # this node itself is now resolved - either written out as a finished
+    # leaf, or replaced by the children just queued (whose increments above
+    # were applied before this decrement, so outstanding never transiently
+    # touches zero while there's genuinely more work about to be queued)
+    outstanding.increment(-1)
 
 
 def find_best_strat_from_json(tag: str) -> dict | None:
@@ -635,6 +692,10 @@ def run_optimization(
     # create a queue that we will add nodes to, and some processes to take
     # things off it
     squeue = CustomQueue()
+    # tracks tree nodes queued but not yet fully resolved, so workers can
+    # tell when there is provably no more work left (see optimize()'s
+    # docstring) - incremented alongside each squeue.put()
+    outstanding = SharedCounter(0)
     procs = []
     # create one progress bar for each thread
     progress_bars = []
@@ -685,6 +746,13 @@ def run_optimization(
         save_baseline_score(starting_squad, gameweeks, tag)
         update_progress()
 
+    # add starting node to the queue *before* starting any worker processes -
+    # otherwise a worker can see an empty queue with outstanding still at its
+    # initial 0 and immediately conclude there's no work and exit, before
+    # this node is ever added.
+    outstanding.increment(1)
+    squeue.put((0, num_free_transfers, 0, 0, starting_squad, {}, "starting"))
+
     # Add Processes to run the target 'optimize' function.
     # This target function needs to know:
     #  num_transfers
@@ -699,11 +767,11 @@ def run_optimization(
             args=(
                 squeue,
                 i,
-                num_expected_outputs,
                 gameweeks,
                 season,
                 tag,
                 chip_gw_dict,
+                outstanding,
                 max_total_hit,
                 allow_unused_transfers,
                 max_opt_transfers,
@@ -716,8 +784,6 @@ def run_optimization(
         processor.daemon = True
         processor.start()
         procs.append(processor)
-    # add starting node to the queue
-    squeue.put((0, num_free_transfers, 0, 0, starting_squad, {}, "starting"))
 
     for i, p in enumerate(procs):
         progress_bars[i].close()

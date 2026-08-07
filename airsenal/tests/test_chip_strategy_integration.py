@@ -192,14 +192,14 @@ def process_calls(monkeypatch):
 
 def _run_and_capture_chip_dict(process_calls, **kwargs):
     """Run run_optimization far enough to construct its Process pool
-    (which captures chip_gw_dict as the 7th positional arg to `optimize`),
+    (which captures chip_gw_dict as the 6th positional arg to `optimize`),
     then let the pre-existing "no strategy found" failure happen (see
     module docstring) rather than working around it."""
     kwargs.setdefault("num_thread", 1)
     with pytest.raises(TypeError):
         fts.run_optimization(**kwargs)
     assert process_calls, "Process was never constructed"
-    return process_calls[0][6]
+    return process_calls[0][5]
 
 
 def test_chip_strategy_off_never_calls_resolver(process_calls, monkeypatch):
