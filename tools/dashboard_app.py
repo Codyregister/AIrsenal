@@ -19,15 +19,17 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, render_template_string
+from sqlalchemy import select
 
 from airsenal.framework.optimization_utils import get_starting_squad
-from airsenal.framework.schema import session
+from airsenal.framework.schema import Absence, Fixture, TransferSuggestion, session
 from airsenal.framework.utils import (
     CURRENT_SEASON,
     NEXT_GAMEWEEK,
     fetcher,
     get_last_complete_gameweek_in_db,
     get_latest_prediction_tag,
+    get_player_name,
     get_predicted_points_for_player,
 )
 from airsenal.scripts.chip_report import build_chip_report
@@ -136,6 +138,58 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
 </table>
 {% endif %}
 
+<h2>This week's suggested transfers</h2>
+{% if not suggested_transfers %}
+<p class="muted">No suggestion found yet - the weekly automated run (see tools/weekly_transfer_run.sh) writes one every Thursday, or run it manually.</p>
+{% else %}
+<p class="muted">From the weekly automated run (chip_strategy=auto, &lambda;=0.5) &middot; computed {{ suggestion_timestamp }} &middot; suggestion only, nothing applied to the live team.</p>
+{% if suggestion_is_new_squad %}
+<p class="muted">This is the initial squad build (no transfer history yet) - {{ suggested_transfers[1]|length }} players.</p>
+{% else %}
+{% for gw, moves in suggested_transfers.items()|sort %}
+<div class="card">
+  <b>GW{{ gw }}</b>
+  {% if suggestion_chip.get(gw) %}<span class="tag play">{{ suggestion_chip[gw]|upper }}</span>{% endif %}
+  <span class="muted"> &middot; {{ "%+.1f"|format(suggestion_gain) }} pts vs. no transfers</span>
+  <table>
+    <tr><th>Out</th><th>In</th></tr>
+    {% for out_name, in_name in moves %}
+    <tr><td>{{ out_name or '-' }}</td><td>{{ in_name or '-' }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endfor %}
+{% endif %}
+{% endif %}
+
+<h2>Squad injuries &amp; availability</h2>
+{% if not absences %}
+<p class="muted">No current injuries/suspensions affecting the squad.</p>
+{% else %}
+<table>
+<tr><th>Player</th><th>Reason</th><th>Details</th><th>Expected back</th></tr>
+{% for a in absences %}
+<tr><td>{{ a.name }}</td><td>{{ a.reason }}</td><td class="muted">{{ a.details or '-' }}</td><td>{{ a.expected_back }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>Upcoming fixtures</h2>
+{% if not upcoming_fixtures %}
+<p class="muted">No fixture data available.</p>
+{% else %}
+<table>
+<tr><th>Team</th>{% for gw in fixture_gameweeks %}<th>GW{{ gw }}</th>{% endfor %}</tr>
+{% for team, gws in upcoming_fixtures.items()|sort %}
+<tr><td>{{ team }}</td>
+{% for gw in fixture_gameweeks %}
+<td>{{ gws.get(gw, ['-'])|join(', ') }}</td>
+{% endfor %}
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
 <h2>Replay validation results</h2>
 {% if not replay_by_season %}
 <p class="muted">No replay results found yet.</p>
@@ -167,6 +221,105 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
 </body>
 </html>
 """
+
+
+def _load_suggested_transfers(fpl_team_id, season, dbsession):
+    """Latest batch of TransferSuggestion rows for this team/season, paired
+    into (out, in) moves per gameweek. Returns
+    (moves_by_gw, chip_by_gw, points_gain, timestamp, is_new_squad)."""
+    latest = dbsession.scalars(
+        select(TransferSuggestion)
+        .where(
+            TransferSuggestion.fpl_team_id == fpl_team_id,
+            TransferSuggestion.season == season,
+        )
+        .order_by(TransferSuggestion.timestamp.desc())
+        .limit(1)
+    ).first()
+    if latest is None:
+        return {}, {}, 0.0, None, False
+
+    rows = dbsession.scalars(
+        select(TransferSuggestion).where(
+            TransferSuggestion.fpl_team_id == fpl_team_id,
+            TransferSuggestion.season == season,
+            TransferSuggestion.timestamp == latest.timestamp,
+        )
+    ).all()
+
+    ins_by_gw: dict[int, list[str]] = {}
+    outs_by_gw: dict[int, list[str]] = {}
+    chip_by_gw: dict[int, str | None] = {}
+    for r in rows:
+        name = get_player_name(r.player_id, dbsession)
+        target = ins_by_gw if r.in_or_out == 1 else outs_by_gw
+        target.setdefault(r.gameweek, []).append(name)
+        chip_by_gw[r.gameweek] = r.chip_played
+
+    is_new_squad = not outs_by_gw and any(len(v) > 4 for v in ins_by_gw.values())
+    moves_by_gw = {}
+    if not is_new_squad:
+        for gw in sorted(set(ins_by_gw) | set(outs_by_gw)):
+            ins = ins_by_gw.get(gw, [])
+            outs = outs_by_gw.get(gw, [])
+            n = max(len(ins), len(outs))
+            moves_by_gw[gw] = [
+                (outs[i] if i < len(outs) else None, ins[i] if i < len(ins) else None)
+                for i in range(n)
+            ]
+    else:
+        moves_by_gw = {1: [name for names in ins_by_gw.values() for name in names]}
+
+    return (
+        moves_by_gw,
+        chip_by_gw,
+        latest.points_gain,
+        latest.timestamp,
+        is_new_squad,
+    )
+
+
+def _load_absences(squad_player_ids, season, next_gw, dbsession):
+    """Injuries/suspensions for the current squad that are still active (no
+    end gameweek, or one in the future)."""
+    rows = dbsession.scalars(
+        select(Absence).where(
+            Absence.player_id.in_(squad_player_ids),
+            Absence.season == season,
+        )
+    ).all()
+    out = []
+    for a in rows:
+        if a.gw_until is not None and a.gw_until < next_gw:
+            continue  # already over
+        out.append(
+            {
+                "name": a.player.name if a.player else str(a.player_id),
+                "reason": a.reason,
+                "details": a.details,
+                "expected_back": f"GW{a.gw_until}" if a.gw_until else "unknown",
+            }
+        )
+    return out
+
+
+def _load_upcoming_fixtures(squad_teams, season, next_gw, n_weeks=5):
+    """{team: {gameweek: [opponent strings]}} for the given teams over the
+    next n_weeks gameweeks."""
+    gw_range = list(range(next_gw, next_gw + n_weeks))
+    fixtures = session.scalars(
+        select(Fixture).where(
+            Fixture.season == season,
+            Fixture.gameweek.in_(gw_range),
+        )
+    ).all()
+    by_team: dict[str, dict[int, list[str]]] = {t: {} for t in squad_teams}
+    for f in fixtures:
+        if f.home_team in by_team:
+            by_team[f.home_team].setdefault(f.gameweek, []).append(f"{f.away_team} (H)")
+        if f.away_team in by_team:
+            by_team[f.away_team].setdefault(f.gameweek, []).append(f"{f.home_team} (A)")
+    return by_team, gw_range
 
 
 def _load_replay_results():
@@ -329,6 +482,41 @@ def index():
     except (ValueError, RuntimeError) as e:
         squad_error = str(e)
 
+    suggested_transfers: dict = {}
+    suggestion_chip: dict = {}
+    suggestion_gain = 0.0
+    suggestion_timestamp = None
+    suggestion_is_new_squad = False
+    try:
+        (
+            suggested_transfers,
+            suggestion_chip,
+            suggestion_gain,
+            suggestion_timestamp,
+            suggestion_is_new_squad,
+        ) = _load_suggested_transfers(FPL_TEAM_ID, CURRENT_SEASON, session)
+    except (ValueError, RuntimeError) as e:
+        suggestion_timestamp = f"error: {e}"
+
+    absences = []
+    upcoming_fixtures = {}
+    fixture_gameweeks = []
+    if squad_players:
+        try:
+            squad_player_ids = [p.player_id for p in squad.players]
+            absences = _load_absences(
+                squad_player_ids, CURRENT_SEASON, next_gw, session
+            )
+        except (ValueError, RuntimeError):
+            absences = []
+        try:
+            squad_teams = {p["team"] for p in squad_players}
+            upcoming_fixtures, fixture_gameweeks = _load_upcoming_fixtures(
+                squad_teams, CURRENT_SEASON, next_gw
+            )
+        except (ValueError, RuntimeError):
+            upcoming_fixtures, fixture_gameweeks = {}, []
+
     replay_by_season, replay_combined = _load_replay_results()
     replay_configs = sorted(
         {c for rows in replay_by_season.values() for c in rows},
@@ -354,6 +542,14 @@ def index():
         replay_combined=replay_combined,
         replay_configs=replay_configs,
         best_combined_config=best_combined_config,
+        suggested_transfers=suggested_transfers,
+        suggestion_chip=suggestion_chip,
+        suggestion_gain=suggestion_gain,
+        suggestion_timestamp=suggestion_timestamp,
+        suggestion_is_new_squad=suggestion_is_new_squad,
+        absences=absences,
+        upcoming_fixtures=upcoming_fixtures,
+        fixture_gameweeks=fixture_gameweeks,
     )
 
 
