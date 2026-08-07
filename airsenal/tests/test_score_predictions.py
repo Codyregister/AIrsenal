@@ -413,6 +413,51 @@ def test_mean_group_prior():
     assert mean_pos.loc[2] == 2
 
 
+def test_mean_group_prior_weighted():
+    """weight_col=None must reproduce the unweighted result exactly; a real
+    weight column should shift the mean towards the more heavily-weighted
+    rows, both for the plain and the per-position prior."""
+    df = pd.DataFrame(
+        {
+            "player_id": [1, 1, 1, 1, 2, 2],
+            "bonus": [1, 1, 1, 4, 2, 2],
+            "season": ["2425", "2425", "2324", "2324", "2425", "2324"],
+            "gameweek": [1] * 6,
+            "position": ["MID"] * 4 + ["FWD"] * 2,
+        }
+    )
+
+    unweighted = mean_group_prior(df, "player_id", "bonus", n_prior=0)
+    all_ones_weight = mean_group_prior(
+        df.assign(w=1.0), "player_id", "bonus", n_prior=0, weight_col="w"
+    )
+    assert (unweighted == all_ones_weight).all()
+
+    # zero-weight the "4" outlier row (player 1, season 2324) entirely -
+    # player 1's mean should collapse to exactly the remaining 1s.
+    weights = df["season"].map({"2425": 1.0, "2324": 0.0})
+    zeroed = mean_group_prior(
+        df.assign(w=weights), "player_id", "bonus", n_prior=0, weight_col="w"
+    )
+    assert zeroed.loc[1] == 1
+
+    # same, but with a per-position prior - the prior itself must also only
+    # draw on the weighted (2425) rows.
+    zeroed_pos = mean_group_prior(
+        df.assign(w=weights),
+        "player_id",
+        "bonus",
+        n_prior=6,
+        prior_by_position=True,
+        weight_col="w",
+    )
+    # MID prior is entirely from player 1's 2425 rows (both bonus=1), FWD
+    # prior entirely from player 2's 2425 row (bonus=2) - both exact, since
+    # the observed mean equals the prior mean in each case.
+    assert zeroed_pos.loc[1] == pytest.approx(1)
+    assert zeroed_pos.loc[2] == pytest.approx(2)
+
+
 def test_fit_bonus():
     with past_data_session_scope() as ts:
         df_bonus = fit_bonus_points(gameweek=1, season="1819", dbsession=ts)

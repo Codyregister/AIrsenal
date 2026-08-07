@@ -40,6 +40,7 @@ from airsenal.framework.schema import (
     PlayerPrediction,
     PlayerScore,
 )
+from airsenal.framework.season import season_str_to_year
 from airsenal.framework.utils import (
     CURRENT_SEASON,
     NEXT_GAMEWEEK,
@@ -58,6 +59,19 @@ from airsenal.framework.utils import (
 )
 
 np.random.seed(42)
+
+# Per-season time-decay for fit_bonus_points - see that function's docstring.
+# Validated by backtesting: predicted 2024/25 bonus points using only prior
+# (2020/21-2023/24) seasons' history at a range of epsilon values, compared
+# against what those players actually scored in 2024/25. Every epsilon < 1.0
+# (i.e. any recency weighting at all) beat the undecayed baseline on both mean
+# absolute error and correlation; 0.2 gave the best MAE (0.3 the best
+# correlation, both close) before performance degraded again at more
+# aggressive decay (0.1) from too little history remaining per player. Also
+# matches DEFAULT_PLAYER_EPSILON in player_model.py, which uses the same
+# value for the same kind of individual-player (as opposed to team-level)
+# time decay.
+DEFAULT_BONUS_EPSILON = 0.2
 # consider probabilities of scoring/conceding up to this many goals
 MAX_GOALS = 10
 
@@ -834,38 +848,64 @@ def mean_group_prior(
     mean_col: str,
     n_prior: int = 10,
     prior_by_position: bool = False,
+    weight_col: str | None = None,
 ) -> pd.Series:
     """
     Calculate mean of column col in df, grouped by group_col, mixed with n_prior matches
     worth of data using the overall mean of mean_col.
+
+    If weight_col is given, each row is weighted by that column instead of every
+    row counting equally (e.g. for recency weighting - see fit_bonus_points'
+    epsilon); the prior (overall, or per-position) mean is weighted the same way.
+    weight_col=None reproduces the original unweighted behaviour exactly.
     """
-    group_counts = df.groupby(group_col)[mean_col].count()
-    group_sums = df.groupby(group_col)[mean_col].sum()
+    weights = (
+        df[weight_col] if weight_col is not None else pd.Series(1.0, index=df.index)
+    )
+    weighted_vals = df[mean_col] * weights
+
+    group_weight_sum = weights.groupby(df[group_col]).sum()
+    group_val_sum = weighted_vals.groupby(df[group_col]).sum()
     group_position = (
         df.sort_values(by=["season", "gameweek"]).groupby(group_col)["position"].last()
     )
 
     if prior_by_position:
-        prior_sum = df.groupby("position")[mean_col].mean() * n_prior
-        return (group_sums + prior_sum.loc[group_position].values) / (
-            group_counts + n_prior
+        pos_weight_sum = weights.groupby(df["position"]).sum()
+        pos_val_sum = weighted_vals.groupby(df["position"]).sum()
+        prior_mean = pos_val_sum / pos_weight_sum
+        prior_sum = prior_mean * n_prior
+        return (group_val_sum + prior_sum.loc[group_position].values) / (
+            group_weight_sum + n_prior
         )
 
-    prior_sum = n_prior * df[mean_col].mean()
-    return (group_sums + prior_sum) / (group_counts + n_prior)
+    prior_mean = weighted_vals.sum() / weights.sum()
+    prior_sum = n_prior * prior_mean
+    return (group_val_sum + prior_sum) / (group_weight_sum + n_prior)
 
 
 def fit_bonus_points(
     gameweek: int = NEXT_GAMEWEEK,
     season: str = CURRENT_SEASON,
     n_prior: int = 10,
+    epsilon: float = DEFAULT_BONUS_EPSILON,
     dbsession: Session = session,
 ) -> tuple[pd.Series, pd.Series]:
     """
     Calculate the average bonus points scored by each player for matches they play
     between 60 and 90 minutes, and matches they play between 30 and 59 minutes.
-    Mean is calculated as sum of all bonus points divided by either the number of
-    maches the player has played in or min_matches, whichever is greater.
+    Mean is calculated as a weighted sum of bonus points divided by either the
+    (weighted) number of matches the player has played in or min_matches,
+    whichever is greater.
+
+    epsilon: per-season time-decay factor (same convention as
+    DEFAULT_TEAM_EPSILON in bpl_interface.py) - a match played n seasons before
+    `season` is weighted epsilon**n, so more recent matches count for more.
+    epsilon=1.0 disables decay (every match weighted equally, matching this
+    function's behaviour before recency weighting was added - see the 2026/27
+    Bonus Points System rebalance, which this exists to let the model adapt to
+    quickly once real current-season data is available, rather than that data
+    being diluted equally against years of pre-rebalance history).
 
     Returns tuple of dataframes - first index bonus points for 60 to 90 mins, second
     index bonus points for 30 to 59 mins.
@@ -873,6 +913,7 @@ def fit_bonus_points(
     NOTE: Minutes values are currently hardcoded - this function and fit_bonus_points
     must be changed together.
     """
+    target_year = season_str_to_year(season)
 
     def get_bonus_df(min_minutes, max_minutes):
         df = get_player_scores(
@@ -881,9 +922,16 @@ def fit_bonus_points(
             min_minutes=min_minutes,
             max_minutes=max_minutes,
             dbsession=dbsession,
-        )
+        ).copy()
+        seasons_ago = target_year - df["season"].apply(season_str_to_year)
+        df["_recency_weight"] = epsilon**seasons_ago
         return mean_group_prior(
-            df, "player_id", "bonus", n_prior=n_prior, prior_by_position=True
+            df,
+            "player_id",
+            "bonus",
+            n_prior=n_prior,
+            prior_by_position=True,
+            weight_col="_recency_weight",
         )
 
     df_90 = get_bonus_df(60, 90)
