@@ -239,6 +239,52 @@ class PlayerAttributes(Base):
         )
 
 
+class PriceChangeSnapshot(Base):
+    """A daily snapshot of price/transfer-activity data per player, used to
+    estimate progress towards the next daily price-change deadline (see
+    airsenal/framework/price_change.py). Separate from PlayerAttributes,
+    which only stores one row per (player, season, gameweek) - price changes
+    happen daily, so this needs finer-grained history than that table can
+    hold without changing its meaning for everything else that reads it.
+    """
+
+    __tablename__ = "price_change_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "player_id",
+            "season",
+            "snapshot_date",
+            name="uq_price_change_snapshot_player_season_date",
+        ),
+        Index(
+            "ix_price_change_snapshot_player_season_date",
+            "player_id",
+            "season",
+            "snapshot_date",
+        ),
+    )
+    id: Mapped[intpk] = mapped_column(autoincrement=True)
+    player_id: Mapped[int] = mapped_column(
+        ForeignKey("player.player_id"), nullable=False
+    )
+    season: Mapped[str100]
+    # ISO date (YYYY-MM-DD, UK-time-of-fetch) this snapshot represents - not
+    # a full timestamp, since we want at most one row per player per day
+    # (the unique constraint enforces this); the fetch script upserts on
+    # re-run within the same day, keeping only the latest data.
+    snapshot_date: Mapped[str100]
+    price: Mapped[int]
+    # Season-cumulative totals, as returned directly by the FPL API - NOT
+    # reset daily or per-gameweek, so diffing consecutive daily snapshots
+    # gives a clean "net transfers since yesterday" figure with no reset
+    # artefacts (unlike the API's own transfers_in_event/transfers_out_event
+    # fields, which reset at the start of each gameweek).
+    transfers_in: Mapped[int]
+    transfers_out: Mapped[int]
+    selected_by_percent: Mapped[float]
+    timestamp: Mapped[str100]  # full fetch timestamp, for debugging/audit
+
+
 class Absence(Base):
     __tablename__ = "absence"
     id: Mapped[intpk] = mapped_column(autoincrement=True)

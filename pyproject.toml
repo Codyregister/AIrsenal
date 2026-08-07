@@ -68,6 +68,7 @@ airsenal_scrape_transfermarkt = "airsenal.scripts.scrape_transfermarkt:main"
 airsenal_plot = "airsenal.scripts.plot_league_standings:main"
 airsenal_save_absences = "airsenal.scripts.save_expected_absences:main"
 airsenal_chip_report = "airsenal.scripts.chip_report:main"
+airsenal_price_change_snapshot = "airsenal.scripts.fill_price_change_snapshot:main"
 
 [build-system]
 requires = ["hatchling"]
