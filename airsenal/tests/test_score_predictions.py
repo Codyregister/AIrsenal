@@ -8,6 +8,7 @@ import pytest
 from bpl import ExtendedDixonColesMatchPredictor, NeutralDixonColesMatchPredictor
 from sqlalchemy import select
 
+import airsenal.framework.prediction_utils as pu
 from airsenal.conftest import past_data_session_scope
 from airsenal.framework.bpl_interface import (
     DEFAULT_TEAM_EPSILON,
@@ -25,6 +26,7 @@ from airsenal.framework.player_model import (
 from airsenal.framework.prediction_utils import (
     fit_bonus_points,
     fit_card_points,
+    fit_def_con,
     fit_player_data,
     fit_save_points,
     get_attacking_points,
@@ -469,6 +471,21 @@ def test_fit_bonus():
             assert all(df >= 0)
 
 
+def test_fit_bonus_epsilon_changes_result():
+    """Sanity check that the epsilon parameter is actually wired through to
+    the result, not just accepted and ignored - full decay (epsilon close to
+    0) should differ from no decay (epsilon=1) whenever multiple seasons of
+    data exist for a player."""
+    with past_data_session_scope() as ts:
+        undecayed = fit_bonus_points(
+            gameweek=1, season="1819", epsilon=1.0, dbsession=ts
+        )
+        decayed = fit_bonus_points(
+            gameweek=1, season="1819", epsilon=0.01, dbsession=ts
+        )
+        assert not undecayed[0].equals(decayed[0])
+
+
 def test_fit_saves():
     with past_data_session_scope() as ts:
         df_saves = fit_save_points(gameweek=1, season="1819", dbsession=ts)
@@ -484,3 +501,45 @@ def test_fit_cards():
         assert len(df_cards) > 0
         assert all(df_cards <= 0)
         assert all(df_cards >= -3)
+
+
+def test_fit_cards_epsilon_changes_result():
+    with past_data_session_scope() as ts:
+        undecayed = fit_card_points(
+            gameweek=1, season="1819", epsilon=1.0, dbsession=ts
+        )
+        decayed = fit_card_points(gameweek=1, season="1819", epsilon=0.01, dbsession=ts)
+        assert not undecayed.equals(decayed)
+
+
+def test_fit_def_con_epsilon(monkeypatch):
+    """defensive_contribution is a 2025/26-or-later FPL stat, so the historic
+    test fixture DB (1718/1819 seasons) has none - stub get_player_scores
+    directly instead, to check fit_def_con's epsilon wiring and its
+    prior_by_position weighting both work correctly without needing real
+    defensive-contribution data in a DB fixture."""
+
+    def fake_get_player_scores(
+        season, gameweek, min_minutes=0, max_minutes=90, position=None, dbsession=None
+    ):
+        # two players, two seasons each, one appearance meeting the
+        # def-cons threshold and one not, per player
+        return pd.DataFrame(
+            {
+                "player_id": [1, 1, 2, 2],
+                "season": ["2324", "2425", "2324", "2425"],
+                "gameweek": [1, 1, 1, 1],
+                "position": [position] * 4,
+                "defensive_contribution": [20, 0, 0, 20],
+            }
+        )
+
+    monkeypatch.setattr(pu, "get_player_scores", fake_get_player_scores)
+
+    df_90_undecayed, _ = fit_def_con(gameweek=1, season="2425", n_prior=0, epsilon=1.0)
+    df_90_decayed, _ = fit_def_con(gameweek=1, season="2425", n_prior=0, epsilon=0.01)
+    # undecayed: both seasons count equally, so both players average to the
+    # same (one hit, one miss each) - decayed: only the 2425 row survives,
+    # so player 1 (missed in 2425) and player 2 (hit in 2425) diverge.
+    assert df_90_undecayed.loc[1] == pytest.approx(df_90_undecayed.loc[2])
+    assert df_90_decayed.loc[1] != df_90_decayed.loc[2]

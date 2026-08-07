@@ -72,6 +72,27 @@ np.random.seed(42)
 # value for the same kind of individual-player (as opposed to team-level)
 # time decay.
 DEFAULT_BONUS_EPSILON = 0.2
+
+# Per-season time-decay for fit_card_points. Validated the same way as
+# DEFAULT_BONUS_EPSILON (predicted 2024/25 card points from only prior
+# seasons at a range of epsilon values, compared against actual 2024/25
+# outcomes) - but with the OPPOSITE result: unlike bonus points, decay
+# monotonically hurt both MAE and correlation here, with epsilon=1.0 (no
+# decay) winning outright. This makes sense - card-proneness looks like a
+# stable per-player trait (aggressive tacklers stay aggressive tacklers)
+# rather than something tied to a rule change, so more historical data
+# genuinely helps rather than going stale. Left at 1.0 (i.e. decay disabled
+# by default) rather than forcing the same value as the other epsilons for
+# consistency's sake - the evidence for cards points the other way.
+DEFAULT_CARD_EPSILON = 1.0
+
+# Per-season time-decay for fit_def_con. NOT validated by backtesting (see
+# fit_def_con's docstring - "defensive contribution" is a 2025/26-or-later
+# scoring category, so there's only one season of real data available,
+# insufficient to hold one out and validate against). Set to match
+# DEFAULT_PLAYER_EPSILON/DEFAULT_BONUS_EPSILON by convention, not evidence.
+DEFAULT_DEF_CON_EPSILON = 0.2
+
 # consider probabilities of scoring/conceding up to this many goals
 MAX_GOALS = 10
 
@@ -969,25 +990,39 @@ def fit_card_points(
     season: str = CURRENT_SEASON,
     n_prior: int = 10,
     min_minutes: int = 1,
+    epsilon: float = DEFAULT_CARD_EPSILON,
     dbsession: Session = session,
 ) -> pd.Series:
     """
     Calculate the average points per match lost to yellow or red cards
     for each player.
 
+    epsilon: per-season time-decay factor, same convention as
+    fit_bonus_points' epsilon - a match played n seasons before `season` is
+    weighted epsilon**n. epsilon=1.0 disables decay (every match weighted
+    equally, the original behaviour).
+
     Returns pandas series index by player ID, values average card points.
     """
+    target_year = season_str_to_year(season)
     df = get_player_scores(
         season, gameweek, min_minutes=min_minutes, dbsession=dbsession
-    )
+    ).copy()
 
     df["card_pts"] = (
         points_for_yellow_card * df["yellow_cards"]
         + points_for_red_card * df["red_cards"]
     )
+    seasons_ago = target_year - df["season"].apply(season_str_to_year)
+    df["_recency_weight"] = epsilon**seasons_ago
 
     return mean_group_prior(
-        df, "player_id", "card_pts", n_prior=n_prior, prior_by_position=False
+        df,
+        "player_id",
+        "card_pts",
+        n_prior=n_prior,
+        prior_by_position=False,
+        weight_col="_recency_weight",
     )
 
 
@@ -995,6 +1030,7 @@ def fit_def_con(
     gameweek: int = NEXT_GAMEWEEK,
     season: str = CURRENT_SEASON,
     n_prior: int = 10,
+    epsilon: float = DEFAULT_DEF_CON_EPSILON,
     dbsession: Session = session,
 ) -> tuple[pd.Series, pd.Series]:
     """
@@ -1004,9 +1040,23 @@ def fit_def_con(
     Mean is calculated as sum of all bonus points divided by either the number of
     maches the player has played in or min_matches, whichever is greater.
 
+    epsilon: per-season time-decay factor, same convention as
+    fit_bonus_points' epsilon - a match played n seasons before `season` is
+    weighted epsilon**n. epsilon=1.0 disables decay (every match weighted
+    equally, the original behaviour). NOTE: unlike fit_bonus_points'
+    DEFAULT_BONUS_EPSILON, DEFAULT_DEF_CON_EPSILON has NOT been validated by
+    backtesting - "defensive contribution" is a 2025/26-season-or-later FPL
+    scoring category, so there is currently only one season of real data to
+    validate against (not enough to hold one out and check against). It's
+    set to match DEFAULT_PLAYER_EPSILON/DEFAULT_BONUS_EPSILON by convention
+    rather than evidence for now; re-validate by backtesting once 2+ seasons
+    of real defensive_contribution data exist (see fit_bonus_points'
+    validation in git history for the method to reuse).
+
     Returns tuple of dataframes - first index bonus points for 60 to 90 mins, second
     index bonus points for 30 to 59 mins.
     """
+    target_year = season_str_to_year(season)
 
     def get_def_con_df(min_minutes, max_minutes):
         dfs = []
@@ -1024,12 +1074,17 @@ def fit_def_con(
             ).astype(int) * points_for_def_cons
             dfs.append(df)
 
+        combined = pd.concat(dfs)
+        seasons_ago = target_year - combined["season"].apply(season_str_to_year)
+        combined["_recency_weight"] = epsilon**seasons_ago
+
         return mean_group_prior(
-            pd.concat(dfs),
+            combined,
             "player_id",
             "def_con_pts",
             n_prior=n_prior,
             prior_by_position=True,
+            weight_col="_recency_weight",
         )
 
     df_90 = get_def_con_df(60, 90)
