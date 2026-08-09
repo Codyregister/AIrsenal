@@ -71,12 +71,27 @@ the "auto ≥ greedy" bar overall. A λ grid (0.3–0.8) showed a real interior
 optimum around 0.5, not simply "lower is better" — λ=0.3 was the *worst*
 variant tested (too eager to play), λ=0.8 the most conservative.
 
-A third season (2223) was attempted to strengthen this result but abandoned —
-see the two blank-gameweek bugs below, both specific to that season. Two
-unrelated real bugs were found and fixed along the way (see git log for
+Two unrelated real bugs were found and fixed along the way (see git log for
 `0a1bea1`, `3f31a24`, `28bce0d`): a pandas mixed-timezone crash, a silent
 squad-reconstruction failure on budget-edge transfers, and a stale
 2-vs-5 free-transfer banking cap.
+
+**Update (2026-08-09) — 3rd season (2223) added.** After fixing the four
+bugs above (two blank-gameweek crashes, a confusing-error-instead-of-clean-
+failure quirk, and an unreliable initial-squad GA), completed a clean 2223
+replay: **off 902, greedy 989, auto (λ=0.5) 897**. Combined across all
+3 seasons: **greedy 3061 > auto 2962 (3.2% behind greedy) > off 2872**.
+2223 was auto's *worst* relative showing of the three seasons - it didn't
+even clear the "off" baseline this time (897 vs 902), and voluntarily
+played only the forced GW17 World Cup wildcard, holding every other chip
+all season (`chips_played: {"17": "wildcard"}` vs greedy's five: TC@2,
+BB@3, FH@5, WC@6, WC@17). A 3rd season doesn't strengthen the case for
+`auto` over `greedy` - if anything it weakens it. **Conclusion stands:
+live default stays `off`/what the automated weekly job actually runs
+(`greedy` for team 1) rather than flipping to `auto`.** See
+`tools/weekly_transfer_run_team2_auto.sh` for the live A/B test now
+running `auto` λ=0.5 on a second team once one exists, as a further,
+non-replay check on this conclusion.
 
 - [x] **Blank-gameweek crash in team-model fitting** — fixed 2026-08-07.
       `get_result_dict` (`airsenal/framework/bpl_interface.py`) did
