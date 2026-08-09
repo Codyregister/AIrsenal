@@ -72,3 +72,26 @@ Roughly ordered by how much value they'd add for the effort involved.
 - Config for which FPL team to show is now env-var driven
   (`DASHBOARD_FPL_TEAM_ID`) — could go further and support tracking multiple
   teams/squads in one view if that ever becomes useful.
+
+## Pending: second team for a live chip-strategy A/B test (2026-08-09)
+
+Decided to live-test greedy vs. auto (λ=0.5) with two real FPL teams this
+season, since 2 seasons of replay evidence wasn't enough to call it (greedy
+2072 > auto 2065 > off 1970, combined actual points — see TODO.md §1).
+Team 1 is the existing team (742663), switched to `chip_strategy=manual`
++ all `*_week=0` (greedy) via
+`tools/weekly_transfer_run_team1_greedy.sh`. Team 2 (`chip_strategy=auto`,
+`risk_lambda=0.5`) is scaffolded in
+`tools/weekly_transfer_run_team2_auto.sh` but **not yet active** — it exits
+immediately until a real FPL_TEAM_ID is filled in (a second FPL account
+hasn't been created yet). Once it exists:
+
+1. Fill in `FPL_TEAM_ID_TEAM2` in the script.
+2. Seed a dedicated DB: `AIRSENAL_HOME=/root/airsenal_home_dashboard_team2
+   uv run airsenal_setup_db`, then an initial squad build for that team.
+3. Add the script to apollol's crontab (same schedule as team 1).
+4. Extend `dashboard_app.py` to show both teams — not built yet since
+   there's no real data to render/test against until the above exists.
+   Reasonable to genuinely add value: side-by-side squad/suggestion panels,
+   and a running actual-points comparison once gameweeks start (this is
+   the whole point of the experiment).

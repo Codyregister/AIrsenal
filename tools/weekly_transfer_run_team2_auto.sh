@@ -1,0 +1,46 @@
+#!/bin/bash
+# Weekly automated transfer suggestion run for AIrsenal - Team 2 (pending
+# FPL_TEAM_ID), running the "auto" chip-timing strategy at risk_lambda=0.5
+# (our best candidate from replay testing). This is the other arm of a live
+# A/B test against Team 1 (742663, greedy) - see TODO.md for the replay
+# evidence that motivated the comparison.
+#
+# NOT yet scheduled in cron: FPL_TEAM_ID_TEAM2 below is a placeholder.
+# Once the second FPL account exists, fill in its real team ID, seed a
+# dedicated AIRSENAL_HOME DB for it (fill_db_init + an initial squad build,
+# same as was done for team 1), then add this script to crontab alongside
+# weekly_transfer_run_team1_greedy.sh.
+#
+# Suggestion-only: NEVER pass --apply_transfers or --clean here. Surfaced
+# on the dashboard (tools/dashboard_app.py) - nothing here touches the
+# live FPL team.
+set -euo pipefail
+
+FPL_TEAM_ID_TEAM2="REPLACE_ME_WITH_REAL_TEAM_ID"
+if [ "$FPL_TEAM_ID_TEAM2" = "REPLACE_ME_WITH_REAL_TEAM_ID" ]; then
+  echo "weekly_transfer_run_team2_auto.sh: FPL_TEAM_ID_TEAM2 not set yet - skipping." >&2
+  exit 0
+fi
+
+cd /root/airsenal_replay
+source "$HOME/.local/bin/env"
+
+export FPL_TEAM_ID="$FPL_TEAM_ID_TEAM2"
+export AIRSENAL_HOME=/root/airsenal_home_dashboard_team2
+
+LOG_DIR=/root/airsenal_replay/weekly_run_logs
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/$(date +%Y%m%d_%H%M%S)_team2.log"
+
+{
+  echo "=== Weekly transfer run (team2_auto) started $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+  uv run airsenal_run_pipeline \
+    --weeks_ahead 3 \
+    --fpl_team_id "$FPL_TEAM_ID_TEAM2" \
+    --chip_strategy auto \
+    --risk_lambda 0.5
+  echo "=== Weekly transfer run (team2_auto) finished $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+} >> "$LOG_FILE" 2>&1
+
+# keep the last 12 weeks of logs, prune older ones
+find "$LOG_DIR" -name "*.log" -mtime +84 -delete
