@@ -196,6 +196,64 @@ class TestChipUsageTracking:
         }
 
 
+class TestInitialSquadFidelity:
+    """Regression test: the initial squad build used to reuse whatever
+    (possibly very low, e.g. 15) num_iterations was passed for the
+    per-gameweek tree-search reruns, and was observed to fail to converge
+    on a complete squad ("Squad is incomplete") a meaningful fraction of
+    the time at that fidelity - aborting the whole replay. It only happens
+    once per replay (no tractability pressure to keep it low), so it
+    should always use at least 100 generations/population regardless of
+    num_iterations.
+    """
+
+    def test_uses_at_least_100_regardless_of_num_iterations(self):
+        squad = _make_squad_mock()
+        with (
+            patch.object(rs, "session_scope", _dummy_session_scope),
+            patch.object(rs, "get_gameweeks_array", return_value=[10, 11, 12]),
+            patch.object(rs, "make_predictedscore_table", return_value="sometag"),
+            patch.object(
+                rs, "fill_initial_squad", return_value=squad
+            ) as mock_fill_initial,
+        ):
+            rs.replay_season(
+                season="2324",
+                gameweek_start=10,
+                gameweek_end=10,
+                new_squad=True,
+                fpl_team_id=-1,
+                tag_prefix="test_replay_season_initial_squad_fidelity",
+                num_iterations=15,
+            )
+        _, kwargs = mock_fill_initial.call_args
+        assert kwargs["num_generations"] == 100
+        assert kwargs["population_size"] == 100
+
+    def test_respects_a_higher_explicit_num_iterations(self):
+        squad = _make_squad_mock()
+        with (
+            patch.object(rs, "session_scope", _dummy_session_scope),
+            patch.object(rs, "get_gameweeks_array", return_value=[10, 11, 12]),
+            patch.object(rs, "make_predictedscore_table", return_value="sometag"),
+            patch.object(
+                rs, "fill_initial_squad", return_value=squad
+            ) as mock_fill_initial,
+        ):
+            rs.replay_season(
+                season="2324",
+                gameweek_start=10,
+                gameweek_end=10,
+                new_squad=True,
+                fpl_team_id=-1,
+                tag_prefix="test_replay_season_initial_squad_fidelity_high",
+                num_iterations=200,
+            )
+        _, kwargs = mock_fill_initial.call_args
+        assert kwargs["num_generations"] == 200
+        assert kwargs["population_size"] == 200
+
+
 class TestOptimizationFailureFallback:
     """Regression tests for the 2223 replay re-run (2026-08-09): a
     genuinely blank gameweek can leave the tree search with zero valid

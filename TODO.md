@@ -151,7 +151,20 @@ squad-reconstruction failure on budget-edge transfers, and a stale
       human manager would actually do on a genuinely blank gameweek)
       instead of aborting - flagged per-gameweek via a new
       `optimization_fallback` field in the replay results for honest
-      analysis later. Replay re-run in progress with all three fixes.
+      analysis later.
+
+      **Fourth issue found, also fixed (2026-08-09):** with the above three
+      fixed, re-running the replay 3 times surfaced a *different*,
+      non-blank-gameweek problem: the one-time initial squad build (GW1)
+      reused `num_iterations` (15, reduced for per-gameweek tractability)
+      for its own GA population/generations, and failed to converge on a
+      complete squad ("Squad is incomplete" from `Squad.optimize_lineup`)
+      2 times out of 3 - aborting the whole season's replay on pure GA
+      randomness, since the initial build only happens once per replay and
+      was never the reason `num_iterations` needed to be small in the
+      first place. Decoupled it: the initial squad build now always uses
+      at least 100 generations/population regardless of `num_iterations`.
+      Replay re-run in progress with all four fixes.
 
 ## 2. Optimisation engine
 

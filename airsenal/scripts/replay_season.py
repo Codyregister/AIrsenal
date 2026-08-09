@@ -158,13 +158,26 @@ def replay_season(
             continue
         if gw == gameweek_start and new_squad:
             print("Creating initial squad...")
+            # Deliberately NOT num_iterations: that knob exists to keep the
+            # per-gameweek wildcard/free-hit tree-search reruns tractable
+            # across many gameweeks (see this function's docstring), and can
+            # be set as low as 15-20 for a replay. The initial squad build
+            # only happens once per replay, so there's no tractability
+            # pressure to shrink it - and at num_iterations=15 the GA was
+            # observed to fail to converge on a complete squad a meaningful
+            # fraction of the time ("Squad is incomplete" from
+            # Squad.optimize_lineup), aborting the whole replay over pure
+            # GA randomness. Use a fixed, more reliable population/generation
+            # count instead, floored so an explicitly higher num_iterations
+            # still gets used.
+            initial_squad_iterations = max(num_iterations, 100)
             squad = fill_initial_squad(
                 tag,
                 gw_range,
                 season,
                 fpl_team_id,
-                num_generations=num_iterations,
-                population_size=num_iterations,
+                num_generations=initial_squad_iterations,
+                population_size=initial_squad_iterations,
                 is_replay=True,
             )
             # no points hits due to unlimited transfers to initialise team
