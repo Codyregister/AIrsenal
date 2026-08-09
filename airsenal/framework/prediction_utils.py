@@ -46,12 +46,12 @@ from airsenal.framework.utils import (
     NEXT_GAMEWEEK,
     fastcopy,
     fetcher,
-    get_fixtures_for_gameweek,
     get_fixtures_for_player,
     get_max_matches_per_player,
     get_player,
     get_player_from_api_id,
     get_recent_minutes_for_player,
+    get_reference_date_for_gameweek,
     is_future_gameweek,
     list_players,
     session,
@@ -746,13 +746,7 @@ def process_player_data(
 
     # compute the time difference for each fixture in results to the first fixture of
     # the next gameweek
-    now_date = np.array(
-        [
-            pd.Timestamp(f.date).replace(tzinfo=None).date()
-            for f in get_fixtures_for_gameweek(gameweek, season, dbsession)
-            if f.date is not None
-        ]
-    ).min()
+    now_date = get_reference_date_for_gameweek(gameweek, season, dbsession).date()
     # df has blank placeholder rows with NaT "date" to ensure the same number of rows
     # per player. Fill these with the earliest match date as a placeholder, but they
     # will get ignored when fitting the model.

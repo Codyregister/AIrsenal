@@ -972,6 +972,34 @@ def get_fixture_teams(fixtures: Iterable[Fixture]) -> list[tuple[str, str]]:
     return [(fixture.home_team, fixture.away_team) for fixture in fixtures]
 
 
+def get_reference_date_for_gameweek(
+    gameweek: int, season: str, dbsession: Session = session
+) -> pd.Timestamp:
+    """
+    Reference date used as the "now" point for time-decay weighting in the
+    team and player models: the earliest kickoff in `gameweek`. Blank
+    gameweeks have no fixtures of their own (e.g. 2022-23's World
+    Cup-disrupted calendar), so fall back to the earliest dated fixture in
+    the nearest surrounding gameweek (checking later gameweeks before
+    earlier ones at each distance, arbitrarily).
+    """
+    offset = 0
+    while offset <= 38:
+        for candidate in {gameweek + offset, gameweek - offset}:
+            if candidate < 1:
+                continue
+            dates = [
+                pd.Timestamp(f.date).replace(tzinfo=None)
+                for f in get_fixtures_for_gameweek(candidate, season, dbsession)
+                if f.date is not None
+            ]
+            if dates:
+                return min(dates)
+        offset += 1
+    msg = f"No fixtures with dates found near gameweek {gameweek} of {season}"
+    raise ValueError(msg)
+
+
 def get_player_scores(
     fixture: Fixture | None = None,
     player: Player | None = None,

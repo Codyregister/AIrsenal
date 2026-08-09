@@ -117,9 +117,19 @@ squad-reconstruction failure on budget-edge transfers, and a stale
       regardless of any individual node failing. Regression tests in
       `airsenal/tests/test_optimize_worker_resilience.py`.
 
-      Not yet done: re-running the abandoned 3rd replay season (2223) now
-      that both crashes are fixed, to see if it changes the λ=0.5
-      chip-timing conclusion above.
+      **Update (2026-08-09):** re-running the 2223 replay surfaced a
+      second, distinct occurrence of the exact same "unguarded `.min()`
+      over a possibly-empty fixture-date array" bug, in
+      `prediction_utils.py`'s `process_player_data` (crashed all three of
+      off/greedy/auto on the same blank gameweek, one step further into
+      the pipeline than the first fix). Extracted the fallback logic from
+      `bpl_interface.py` into a shared `get_reference_date_for_gameweek()`
+      in `utils.py`, used by both call sites now. A third candidate
+      (`bpl_interface.fixture_probabilities`, called from
+      `chip_timing._team_fixture_strength`) was checked and is already
+      safe - that caller wraps it in a broad `try/except: return 0.5`
+      deliberately, so a blank-gameweek failure there degrades gracefully
+      rather than crashing. Replay re-run in progress.
 
 ## 2. Optimisation engine
 

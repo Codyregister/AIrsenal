@@ -16,6 +16,7 @@ from airsenal.framework.season import CURRENT_SEASON, get_teams_for_season
 from airsenal.framework.utils import (
     get_fixture_teams,
     get_fixtures_for_gameweek,
+    get_reference_date_for_gameweek,
     is_future_gameweek,
 )
 
@@ -29,31 +30,6 @@ DEFAULT_TEAM_EPSILON = 0.9
 # if no time weighting would apply to the model). The optimal value of epsilon above is
 # for the case where this is True.
 DEFAULT_RESCALE_WEIGHTS = True
-
-
-def _get_reference_date(gameweek: int, season: str, dbsession: Session) -> pd.Timestamp:
-    """
-    Reference date used as the "now" point for time-decay weighting: the
-    earliest kickoff in `gameweek`. Blank gameweeks have no fixtures of their
-    own (e.g. 2022-23's World Cup-disrupted calendar), so fall back to the
-    earliest dated fixture in the nearest surrounding gameweek (checking
-    later gameweeks before earlier ones at each distance, arbitrarily).
-    """
-    offset = 0
-    while offset <= 38:
-        for candidate in {gameweek + offset, gameweek - offset}:
-            if candidate < 1:
-                continue
-            dates = [
-                pd.Timestamp(f.date).replace(tzinfo=None)
-                for f in get_fixtures_for_gameweek(candidate, season, dbsession)
-                if f.date is not None
-            ]
-            if dates:
-                return min(dates)
-        offset += 1
-    msg = f"No fixtures with dates found near gameweek {gameweek} of {season}"
-    raise ValueError(msg)
 
 
 def get_result_dict(
@@ -86,7 +62,7 @@ def get_result_dict(
             if r.fixture.date is not None
         ]
     )
-    end_date = _get_reference_date(gameweek, season, dbsession)
+    end_date = get_reference_date_for_gameweek(gameweek, season, dbsession)
     time_diff = (end_date - result_dates) / pd.Timedelta(days=365)
     return {
         "home_team": np.array([r.fixture.home_team for r in results]),

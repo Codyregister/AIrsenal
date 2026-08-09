@@ -2,16 +2,59 @@
 test some db access helper functions
 """
 
+import pytest
+
 from airsenal.conftest import TEST_PAST_SEASON, past_data_session_scope, session_scope
-from airsenal.framework.schema import Player
+from airsenal.framework.schema import Fixture, Player, Result
 from airsenal.framework.utils import (
     get_gameweek_by_date,
     get_last_complete_gameweek_in_db,
     get_player,
     get_player_id,
     get_player_name,
+    get_reference_date_for_gameweek,
     get_return_gameweek_by_date,
 )
+
+
+def test_get_reference_date_for_gameweek_handles_blank_gameweek():
+    """Regression test for a real 2022-23 crash (World Cup fixture
+    disruption): a genuine blank gameweek (no fixtures at all) used to
+    crash callers that did `.min()` over the target gameweek's own fixture
+    dates with no guard for zero fixtures. Should fall back to the nearest
+    surrounding gameweek's earliest dated fixture instead."""
+    season = "9903"
+    with session_scope() as ts:
+        fixture = Fixture()
+        fixture.date = "2022-08-01T15:00:00Z"
+        fixture.gameweek = 1
+        fixture.home_team = "TEAMA"
+        fixture.away_team = "TEAMB"
+        fixture.season = season
+        fixture.tag = "test"
+        ts.add(fixture)
+        ts.flush()
+
+        result = Result()
+        result.fixture_id = fixture.fixture_id
+        result.home_score = 1
+        result.away_score = 0
+        ts.add(result)
+        ts.commit()
+
+        # gameweek 2 is a genuine blank - no Fixture rows exist for it at all
+        ref_date = get_reference_date_for_gameweek(2, season, ts)
+
+    assert ref_date.date().isoformat() == "2022-08-01"
+
+
+def test_get_reference_date_for_gameweek_raises_clear_error_with_nothing_nearby():
+    season = "9904"
+    with (
+        session_scope() as ts,
+        pytest.raises(ValueError, match="No fixtures with dates found"),
+    ):
+        get_reference_date_for_gameweek(1, season, ts)
 
 
 def test_get_player_name(fill_players):
