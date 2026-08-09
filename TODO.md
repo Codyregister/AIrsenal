@@ -129,7 +129,29 @@ squad-reconstruction failure on budget-edge transfers, and a stale
       `chip_timing._team_fixture_strength`) was checked and is already
       safe - that caller wraps it in a broad `try/except: return 0.5`
       deliberately, so a blank-gameweek failure there degrades gracefully
-      rather than crashing. Replay re-run in progress.
+      rather than crashing.
+
+      With both crashes fixed, `off` completed cleanly (919 actual points,
+      GW1-19, wildcard played at the GW17 World Cup hack), confirming the
+      `_check_positions_available` guard and the `optimize()` worker
+      resilience both work correctly under real load. But `greedy` and
+      `auto` still failed - for GW7 specifically (genuinely blank), *every*
+      wildcard/free-hit candidate in that gameweek's small
+      (`weeks_ahead=2`) search tree hit `_check_positions_available`'s "no
+      eligible GK" guard, so the whole tree yielded zero valid strategies.
+      `run_optimization` then crashed with a confusing `TypeError` instead
+      of its own intended clean `ValueError` - a pre-existing quirk noted
+      (and deliberately left unfixed) earlier this project, now fixed:
+      moved the `best_strategy is None` check in
+      `fill_transfersuggestion_table.py` before the `fill_suggestion_table`
+      call that was crashing on it. That alone still aborted the whole
+      season's replay over one unplayable gameweek, so also made
+      `replay_season()` catch that ValueError and fall back to "no
+      transfer this gameweek, keep the existing squad" (matching what a
+      human manager would actually do on a genuinely blank gameweek)
+      instead of aborting - flagged per-gameweek via a new
+      `optimization_fallback` field in the replay results for honest
+      analysis later. Replay re-run in progress with all three fixes.
 
 ## 2. Optimisation engine
 

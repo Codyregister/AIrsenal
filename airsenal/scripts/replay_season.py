@@ -14,6 +14,7 @@ from tqdm import TqdmWarning, tqdm
 
 from airsenal.framework.bpl_interface import DEFAULT_TEAM_EPSILON
 from airsenal.framework.multiprocessing_utils import set_multiprocessing_start_method
+from airsenal.framework.optimization_utils import get_starting_squad
 from airsenal.framework.schema import Transaction, session_scope
 from airsenal.framework.utils import (
     get_gameweeks_array,
@@ -147,7 +148,11 @@ def replay_season(
                 team_model_args=team_model_args,
                 dbsession=session,
             )
-        gw_result = {"gameweek": gw, "predictions_tag": tag}
+        gw_result = {
+            "gameweek": gw,
+            "predictions_tag": tag,
+            "optimization_fallback": False,
+        }
 
         if not transfers:
             continue
@@ -173,19 +178,49 @@ def replay_season(
         else:
             print("Optimising transfers...")
             # find best squad and the strategy for this gameweek
-            squad, best_strategy = run_optimization(
-                gw_range,
-                tag,
-                season=season,
-                fpl_team_id=fpl_team_id,
-                num_thread=num_thread,
-                is_replay=True,
-                max_opt_transfers=max_opt_transfers,
-                num_iterations=num_iterations,
-                chip_gameweeks=dict(chip_gameweeks),
-                chip_strategy=chip_strategy,
-                risk_lambda=risk_lambda,
-            )
+            try:
+                squad, best_strategy = run_optimization(
+                    gw_range,
+                    tag,
+                    season=season,
+                    fpl_team_id=fpl_team_id,
+                    num_thread=num_thread,
+                    is_replay=True,
+                    max_opt_transfers=max_opt_transfers,
+                    num_iterations=num_iterations,
+                    chip_gameweeks=dict(chip_gameweeks),
+                    chip_strategy=chip_strategy,
+                    risk_lambda=risk_lambda,
+                )
+            except ValueError as exc:
+                # The tree search found no valid strategy at all for this
+                # gameweek - can genuinely happen on/near a blank gameweek,
+                # where a wildcard/free-hit candidate squad rebuild fails for
+                # every option in the (small, weeks_ahead-limited) search
+                # tree due to too few eligible players in some position (see
+                # SquadOpt._check_positions_available). Rather than aborting
+                # the whole season's replay over one unplayable gameweek,
+                # fall back to what a human manager would actually do here:
+                # make no transfer and keep the existing squad. No
+                # Transaction row is written, which is exactly correct for
+                # "nothing changed this gameweek" (next gameweek's starting
+                # squad is reconstructed from the Transaction table).
+                print(
+                    f"WARNING: optimization failed for GW{gw} ({exc}) - "
+                    "falling back to no transfers this gameweek rather than "
+                    "aborting the replay."
+                )
+                gw_result["optimization_fallback"] = True
+                squad = get_starting_squad(
+                    next_gw=gw, season=season, fpl_team_id=fpl_team_id, use_api=False
+                )
+                best_strategy = {
+                    "points_hit": {str(gw): 0},
+                    "free_transfers": {str(gw): 0},
+                    "num_transfers": {str(gw): 0},
+                    "players_in": {str(gw): []},
+                    "players_out": {str(gw): []},
+                }
         if best_strategy is None:
             msg = f"Failed to find a strategy for GW{gw}!"
             raise ValueError(msg)

@@ -793,19 +793,25 @@ def run_optimization(
     # find the best from all the strategies tried
     best_strategy = find_best_strat_from_json(tag)
 
+    for _ in range(len(procs)):
+        print("\n")
+
+    if best_strategy is None:
+        # every node in the tree search was abandoned (e.g. a wildcard/free-hit
+        # candidate squad rebuild failed for every option due to too few
+        # eligible players in some position - see SquadOpt._check_positions_available,
+        # which can genuinely happen on/near a blank gameweek). Nothing valid
+        # to write - fail clearly here rather than crash inside
+        # fill_suggestion_table on a None best_strat.
+        msg = "Failed to find a strategy!"
+        raise ValueError(msg)
+
     baseline_score = find_baseline_score_from_json(tag, num_weeks)
     fill_suggestion_table(baseline_score, best_strategy, season, fpl_team_id)
     if is_replay:
         # simulating a previous season, so imitate applying transfers by adding
         # the suggestions to the Transaction table
         fill_transaction_table(starting_squad, best_strategy, season, fpl_team_id, tag)
-
-    for _ in range(len(procs)):
-        print("\n")
-
-    if best_strategy is None:
-        msg = "Failed to find a strategy!"
-        raise ValueError(msg)
 
     if chip_report_text:
         print("================")

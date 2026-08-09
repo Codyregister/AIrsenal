@@ -196,6 +196,84 @@ class TestChipUsageTracking:
         }
 
 
+class TestOptimizationFailureFallback:
+    """Regression tests for the 2223 replay re-run (2026-08-09): a
+    genuinely blank gameweek can leave the tree search with zero valid
+    strategies anywhere (every wildcard/free-hit candidate squad rebuild
+    fails - see SquadOpt._check_positions_available /
+    test_optimization_squad.py), which run_optimization now surfaces as a
+    clean "Failed to find a strategy!" ValueError. replay_season() should
+    not let that abort the whole season - it should fall back to no
+    transfers for that one gameweek and keep going.
+    """
+
+    def test_falls_back_to_no_transfer_and_continues(self):
+        squad = _make_squad_mock()
+        with (
+            patch.object(rs, "session_scope", _dummy_session_scope),
+            patch.object(rs, "get_gameweeks_array", return_value=[10, 11, 12]),
+            patch.object(rs, "make_predictedscore_table", return_value="sometag"),
+            patch.object(
+                rs,
+                "run_optimization",
+                side_effect=ValueError("Failed to find a strategy!"),
+            ),
+            patch.object(rs, "get_starting_squad", return_value=squad) as mock_gss,
+        ):
+            results = rs.replay_season(
+                season="2324",
+                gameweek_start=10,
+                gameweek_end=10,
+                new_squad=False,
+                fpl_team_id=-1,
+                tag_prefix="test_replay_season_fallback",
+                chip_strategy="manual",
+                chip_gameweeks={
+                    "wildcard": 0,
+                    "free_hit": 0,
+                    "triple_captain": 0,
+                    "bench_boost": 0,
+                },
+            )
+
+        # fell back to fetching the existing squad unchanged, rather than
+        # propagating the ValueError and aborting the replay
+        mock_gss.assert_called_once_with(
+            next_gw=10, season="2324", fpl_team_id=-1, use_api=False
+        )
+        gw_result = results["gameweeks"][0]
+        assert gw_result["optimization_fallback"] is True
+        assert gw_result["num_transfers"] == 0
+        assert gw_result["points_hit"] == 0
+        assert gw_result["players_in"] == []
+        assert gw_result["players_out"] == []
+        assert gw_result["chip_played"] is None
+
+    def test_normal_gameweek_is_not_flagged_as_fallback(self):
+        squad = _make_squad_mock()
+        mock_run_opt = _run_single_gw_replay((squad, _best_strategy(10)))
+        assert mock_run_opt.called
+        # sanity check on the companion test above: a normal, successful
+        # gameweek must NOT be flagged as a fallback
+        with (
+            patch.object(rs, "session_scope", _dummy_session_scope),
+            patch.object(rs, "get_gameweeks_array", return_value=[10, 11, 12]),
+            patch.object(rs, "make_predictedscore_table", return_value="sometag"),
+            patch.object(
+                rs, "run_optimization", return_value=(squad, _best_strategy(10))
+            ),
+        ):
+            results = rs.replay_season(
+                season="2324",
+                gameweek_start=10,
+                gameweek_end=10,
+                new_squad=False,
+                fpl_team_id=-1,
+                tag_prefix="test_replay_season_no_fallback",
+            )
+        assert results["gameweeks"][0]["optimization_fallback"] is False
+
+
 class TestReplayResultsOutput:
     """replay_season() should extend, not replace, the existing
     replay_results structure - see docs/chip_timing_spec.md §4.4.

@@ -21,11 +21,12 @@ Two layers of tests:
    tree search) rather than starting a subprocess, and stub out the other
    DB/network-touching calls (get_starting_squad, get_free_transfers).
    Because no strategy is ever actually computed this way,
-   run_optimization always fails after that point - it has a pre-existing
-   (not introduced by this PR) quirk where fill_suggestion_table(None) is
-   called before the "Failed to find a strategy!" ValueError check, which
-   raises TypeError instead. Tests using the fixture below expect that,
-   and only assert on state captured earlier (the recorded Process args).
+   run_optimization always fails after that point with a clean
+   "Failed to find a strategy!" ValueError (previously this crashed with a
+   confusing TypeError instead, from fill_suggestion_table(None) being
+   called before that check - fixed alongside the 2223 replay bugs, see
+   TODO.md). Tests using the fixture below expect the ValueError, and only
+   assert on state captured earlier (the recorded Process args).
 """
 
 from typing import ClassVar
@@ -193,10 +194,10 @@ def process_calls(monkeypatch):
 def _run_and_capture_chip_dict(process_calls, **kwargs):
     """Run run_optimization far enough to construct its Process pool
     (which captures chip_gw_dict as the 6th positional arg to `optimize`),
-    then let the pre-existing "no strategy found" failure happen (see
-    module docstring) rather than working around it."""
+    then let the "no strategy found" failure happen (see module docstring)
+    rather than working around it."""
     kwargs.setdefault("num_thread", 1)
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="Failed to find a strategy"):
         fts.run_optimization(**kwargs)
     assert process_calls, "Process was never constructed"
     return process_calls[0][5]
