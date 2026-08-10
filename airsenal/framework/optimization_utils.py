@@ -105,6 +105,7 @@ def get_starting_squad(
     fpl_team_id=None,
     use_api=False,
     apifetcher=fetcher,
+    dbsession=session,
 ):
     """
     use the transactions table in the db, or the API if requested
@@ -130,13 +131,17 @@ def get_starting_squad(
             )
 
     # otherwise, we use the Transaction table in the DB
-    return get_squad_from_transactions(next_gw, season, fpl_team_id)
+    return get_squad_from_transactions(
+        next_gw, season, fpl_team_id, dbsession=dbsession
+    )
 
 
-def get_squad_from_transactions(gameweek, season=CURRENT_SEASON, fpl_team_id=None):
+def get_squad_from_transactions(
+    gameweek, season=CURRENT_SEASON, fpl_team_id=None, dbsession=session
+):
     if not fpl_team_id:
         # use the most recent transaction in the table
-        most_recent = session.scalars(
+        most_recent = dbsession.scalars(
             select(Transaction)
             .where(Transaction.free_hit == 0, Transaction.season == season)
             .order_by(Transaction.id.desc())
@@ -150,7 +155,7 @@ def get_squad_from_transactions(gameweek, season=CURRENT_SEASON, fpl_team_id=Non
 
     # Don't include free hit transfers as they only apply for the week the
     # chip is activated
-    transactions = session.scalars(
+    transactions = dbsession.scalars(
         select(Transaction)
         .where(
             Transaction.fpl_team_id == fpl_team_id,
@@ -167,7 +172,7 @@ def get_squad_from_transactions(gameweek, season=CURRENT_SEASON, fpl_team_id=Non
     s = Squad(season=season)
     for trans in transactions:
         if trans.bought_or_sold == -1:
-            s.remove_player(trans.player_id, price=trans.price)
+            s.remove_player(trans.player_id, price=trans.price, dbsession=dbsession)
         else:
             # within an individual transfer we can violate the budget and squad
             # constraints, as long as the final squad for that gameweek obeys them
@@ -177,6 +182,7 @@ def get_squad_from_transactions(gameweek, season=CURRENT_SEASON, fpl_team_id=Non
                 gameweek=gameweek,  # not trans.gameweek, to get player's current club
                 check_budget=False,
                 check_team=False,
+                dbsession=dbsession,
             )
     return s
 

@@ -454,7 +454,12 @@ class Squad:
         player_list[1][0].is_vice_captain = True
 
     def get_actual_points(
-        self, gameweek, season, triple_captain=False, bench_boost=False
+        self,
+        gameweek,
+        season,
+        triple_captain=False,
+        bench_boost=False,
+        dbsession=None,
     ):
         """
         Calculate the actual points a squad stored in a historical gameweek/season.
@@ -473,7 +478,9 @@ class Squad:
         need_sub = []
         for p in self.players:
             if p.is_starting or bench_boost:
-                scores = get_playerscores_for_player_gameweek(p, gameweek, season)
+                scores = get_playerscores_for_player_gameweek(
+                    p, gameweek, season, dbsession=dbsession
+                )
                 minutes = sum(s.minutes for s in scores)
                 if minutes > 0:
                     for score in scores:
@@ -510,7 +517,7 @@ class Squad:
                     if not self.is_substitution_allowed(p_out, p_in):
                         continue
                     scores = get_playerscores_for_player_gameweek(
-                        p_in, gameweek, season
+                        p_in, gameweek, season, dbsession=dbsession
                     )
                     minutes = sum(s.minutes for s in scores)
                     if minutes > 0:
