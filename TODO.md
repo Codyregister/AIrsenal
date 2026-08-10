@@ -19,7 +19,7 @@ is no notion of the *opportunity cost* of not holding the chip for a better futu
 gameweek (e.g. a double gameweek or an easy fixture swing).
 
 **Tasks:**
-- [ ] Build a season-long chip value estimator that, for every remaining gameweek,
+- [x] Build a season-long chip value estimator that, for every remaining gameweek,
       estimates the marginal gain of each chip:
       - **Triple captain:** expected points of the best captain candidate that GW
         (doubled fixtures detected from the `Fixture` table; long-range fixture
@@ -30,10 +30,10 @@ gameweek (e.g. a double gameweek or an easy fixture swing).
         unconstrained optimal squad for that GW (free hit peaks in blank/double
         gameweeks; wildcard value grows with squad "staleness", injuries, and
         fixture swings).
-- [ ] Detect double and blank gameweeks explicitly from the `Fixture` table and
+- [x] Detect double and blank gameweeks explicitly from the `Fixture` table and
       surface them in the chip value report (currently DGWs are only implicitly
       summed in predictions).
-- [ ] Add an opportunity-cost decision rule: only recommend playing a chip in the
+- [x] Add an opportunity-cost decision rule: only recommend playing a chip in the
       current horizon if its expected gain exceeds the (uncertainty-discounted)
       best estimated future gain — i.e. `gain_now >= λ · max(gain_future)`, with λ
       tunable and validated by season replays (`airsenal_replay_season`).
@@ -41,26 +41,34 @@ gameweek (e.g. a double gameweek or an easy fixture swing).
       2025/26 two-of-each-chip rules), which makes holding less valuable as the
       deadline approaches: the sunk cost of burning early must be weighed against
       the risk of the chip expiring unused.
-- [ ] Add a `airsenal_chip_report` CLI command that prints the expected value of
+- [x] Add a `airsenal_chip_report` CLI command that prints the expected value of
       each available chip per remaining gameweek and a recommendation
       (play now / hold, with the target gameweek).
-- [ ] Wire `FPLDataFetcher.get_available_chips()` (defined in
+- [x] Wire `FPLDataFetcher.get_available_chips()` (defined in
       `framework/data_fetcher.py` but currently unused) into the optimiser so chip
       availability is auto-detected from the API instead of relying on CLI flags.
       Chip windows (two of each chip, one per half-season, first set expiring at
       GW19) are available without login from the public `bootstrap-static`
       endpoint's `chips` key (verified June 2026 — see spec §2.1).
-- [ ] Integrate the chip recommendation into `airsenal_run_pipeline` so the default
+- [x] Integrate the chip recommendation into `airsenal_run_pipeline` so the default
       run considers chips with the opportunity-cost model instead of defaulting to
-      "never play chips" (`-1`).
-- [ ] Validate with replays: run past seasons with/without the chip-timing model
-      and compare total points.
+      "never play chips" (`-1`). (Wired in behind `--chip_strategy`, default
+      remains `off` — see validation results below for why.)
+- [x] Validate with replays: run past seasons with/without the chip-timing model
+      and compare total points. **Done (2026-08-09), 3 seasons — see below.**
 
-**Status (2026-08-06): implemented, on our fork, not merged upstream.** All four
-tasks above are done (see `docs/chip_timing_spec.md` for the design;
-`airsenal/framework/chip_timing.py`, `airsenal/scripts/chip_report.py`,
-`--chip_strategy` on `airsenal_run_optimization`/`airsenal_run_pipeline`).
-Default is `off` — replay validation doesn't yet support flipping it:
+**Status (2026-08-09): implemented, merged, validated, live on our fork —
+default stays `off` (not upstream).** All four tasks above are done (see
+`docs/chip_timing_spec.md` for the design and §9 for the full final
+validation write-up; `airsenal/framework/chip_timing.py`,
+`airsenal/scripts/chip_report.py`, `--chip_strategy` on
+`airsenal_run_optimization`/`airsenal_run_pipeline`). Default is `off`
+everywhere — replay evidence across all 3 available seasons doesn't support
+flipping it, so the automated weekly job runs `greedy` instead (see
+`tools/weekly_transfer_run_team1_greedy.sh`), and a live 2-team A/B test
+(`greedy` vs `auto` λ=0.5) is running as a further, non-replay check —
+Team 2 is scaffolded but pending a real second FPL account
+(`tools/weekly_transfer_run_team2_auto.sh`):
 
 Replay comparison (off/greedy/auto, `airsenal_replay_season`, GW1-19, reduced
 GA fidelity for tractability — `num_iterations=15`, `weeks_ahead=2`), combined
@@ -179,7 +187,8 @@ non-replay check on this conclusion.
       was never the reason `num_iterations` needed to be small in the
       first place. Decoupled it: the initial squad build now always uses
       at least 100 generations/population regardless of `num_iterations`.
-      Replay re-run in progress with all four fixes.
+      With all four fixes in place, the replay completed cleanly — see the
+      3-season result and final conclusion above.
 
 ## 2. Optimisation engine
 

@@ -1,10 +1,13 @@
 # Design spec: Chip timing & opportunity-cost model
 
-**Status:** ready for implementation. This document is self-contained: it describes
-the current behaviour of the codebase (with file/line references), the desired
-behaviour, a proposed module layout with function signatures, edge cases, a
-validation plan, and acceptance criteria. It is written so that an engineer (or
-agent) with no prior knowledge of AIrsenal can implement the feature.
+**Status:** implemented (PRs 1-4 merged), validated across 3 seasons, shipped
+with a conservative default. See [§9 Validation results](#9-validation-results-final-2026-08-09)
+for the final outcome and current operational status. This document is
+self-contained: it describes the current behaviour of the codebase (with
+file/line references), the desired behaviour, a proposed module layout with
+function signatures, edge cases, a validation plan, and acceptance criteria.
+It is written so that an engineer (or agent) with no prior knowledge of
+AIrsenal can implement the feature.
 
 ---
 
@@ -401,6 +404,82 @@ pre-built historic test database at `airsenal/tests/testdata/testdata_1718_1819.
    initially) + tests.
 4. **PR 4:** replay validation, λ tuning, flip default to `auto`, README/NOTES
    documentation.
+
+## 9. Validation results (final, 2026-08-09)
+
+All four PRs are implemented and merged (see `airsenal/framework/chip_timing.py`,
+`airsenal/scripts/chip_report.py`, `--chip_strategy` on
+`airsenal_run_optimization`/`airsenal_run_pipeline`). Full replay validation
+(§4.4) is complete across all 3 seasons with real historical data
+(`airsenal_replay_season`, GW1-19, `num_iterations=15`/`weeks_ahead=2` reduced
+GA fidelity for tractability):
+
+| Season | off | greedy | auto (λ=0.5) |
+|---|---|---|---|
+| 2324 + 2425 (combined) | 1970 | 2072 | 2065 |
+| 2223 | 902 | 989 | 897 |
+| **Combined actual points, all 3 seasons** | **2872** | **3061** | **2962 (3.2% behind greedy)** |
+
+(2324/2425 were only ever recorded as a combined total, not broken out
+per-season - see git history around commit `526e499` for that earlier
+context.)
+
+**Acceptance criterion 5 ("replay shows auto ≥ greedy") is not met.**
+`greedy` (today's pre-chip-timing "any week is fine" behaviour) wins outright
+across all 3 seasons tested. `auto` at λ=0.5 - the best value found via a
+λ ∈ {0.3, 0.4, 0.5, 0.6, 0.8} grid - comes within 3.2% overall but was
+consistently 2nd place, and 2223 was its *worst* relative showing: it didn't
+even clear the `off` baseline that season (897 vs 902), voluntarily playing
+only the forced GW17 World Cup wildcard rather than any of the five chip
+plays greedy made. Adding a 3rd season weakened, not strengthened, the case
+for `auto`.
+
+**Decision: ship as an opt-in, not a default.** `--chip_strategy` defaults to
+`off` everywhere (`airsenal_run_optimization`, `airsenal_run_pipeline`,
+`airsenal_replay_season`). The automated weekly transfer-suggestion job
+(`tools/weekly_transfer_run_team1_greedy.sh`, cron on apollol) runs `greedy`
+for the live team, matching what the replay evidence actually supports - not
+`auto`. `auto` (λ=0.5) is being tested live instead, as a further,
+non-replay check on the same question: a second FPL team
+(`tools/weekly_transfer_run_team2_auto.sh`, currently inactive pending a real
+second `FPL_TEAM_ID`) will run `auto` head-to-head against team 1's `greedy`
+for real, live seasons - complementary evidence to backtesting, since a live
+season isn't drawn from the same historical data the predictions were partly
+trained on.
+
+Four real, unrelated bugs were found and fixed while getting a clean 2223
+replay (2223's World Cup fixture disruption creates a genuine blank
+gameweek, which earlier replay attempts of this season had never gotten
+past):
+
+1. `bpl_interface.get_result_dict` and (2) `prediction_utils.process_player_data`
+   both crashed on a blank gameweek (`.min()` over an empty fixture-date
+   array, no fallback). Fixed via a shared `utils.get_reference_date_for_gameweek()`.
+2. `SquadOpt._remove_zero_pts` corrupted its position index whenever a whole
+   position had zero eligible players for a gameweek range (can happen on/near
+   a blank gameweek) - `KeyError`/DEAP crash deep in the GA. Fixed the
+   indexing and added a clear fail-fast check. This bug's *consequence* was
+   worse than the crash itself: inside a multiprocessing tree-search worker,
+   the crash silently killed that worker while every other worker hung
+   forever waiting for output that would never come (observed: ~10 hours, no
+   progress, in an earlier session). Fixed by replacing the termination
+   check's precomputed static total with a shared "outstanding work" counter,
+   and wrapping per-node processing in try/except so one bad node can't
+   strand the whole pool.
+3. `run_optimization` crashed with a confusing `TypeError` instead of its own
+   intended clean `ValueError` when the tree search found zero valid
+   strategies at all (every wildcard/free-hit candidate failing bug 2's guard
+   simultaneously, for a gameweek near the blank one). `replay_season()` also
+   now catches that case and falls back to "no transfer this gameweek" rather
+   than aborting the entire season's replay over one unplayable gameweek.
+4. (Unrelated to blank gameweeks) the one-time initial squad build reused
+   the reduced per-gameweek `num_iterations` (e.g. 15) for its own GA, and
+   failed to converge on a complete squad ~2 times out of 3 at that fidelity
+   - it only happens once per replay, so there was never a tractability
+   reason to keep it low. Now always uses ≥100 regardless.
+
+See `TODO.md` §1 for the day-by-day account and git history
+(`60738b4`..`a44734e`) for the individual fixes, each with its own tests.
 
 ## Appendix A: codebase orientation for the implementer
 
