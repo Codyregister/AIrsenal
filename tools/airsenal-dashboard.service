@@ -1,0 +1,17 @@
+[Unit]
+Description=AIrsenal ops dashboard (tools/dashboard_app.py)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/airsenal_replay
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DASHBOARD_FPL_TEAM_ID=742663
+Environment=AIRSENAL_HOME=/root/airsenal_home_dashboard
+Environment=FPL_TEAM_ID=742663
+ExecStart=/root/.local/bin/uv run python3 tools/dashboard_app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

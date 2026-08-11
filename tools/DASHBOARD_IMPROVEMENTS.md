@@ -6,10 +6,14 @@ Roughly ordered by how much value they'd add for the effort involved.
 
 ## Reliability / operability
 
-- **Run as a systemd service, not a bare tmux window.** Currently it's
+- **Run as a systemd service, not a bare tmux window.** ~~Currently it's
   killed if the tmux session dies or the host reboots, and nothing restarts
-  it automatically. A simple unit file with `Restart=on-failure` would fix
-  both. Low effort, meaningful durability win.
+  it automatically.~~ **Done (2026-08-10)** — hit exactly this: apollol was
+  rebooted (to reattach a TrueNAS drive) and silently took the dashboard
+  down with it. Now runs as `airsenal-dashboard.service`
+  (`tools/airsenal-dashboard.service`, deployed to
+  `/etc/systemd/system/` on apollol, `systemctl enable --now`) —
+  `Restart=on-failure` and starts automatically on boot.
 - **Front it with gunicorn (or similar) instead of Flask's dev server.**
   We're already seeing "WARNING: this is a development server" in the logs.
   Fine for a LAN-only tool, but worth doing before trusting it with anything
