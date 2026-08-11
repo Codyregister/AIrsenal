@@ -12,7 +12,11 @@
 set -euo pipefail
 
 cd /root/airsenal_replay
-source "$HOME/.local/bin/env"
+# hardcoded PATH, not `source ~/.local/bin/env` - cron's environment
+# doesn't reliably set HOME, and that env script itself references $HOME
+# unguarded. Silently killed price_change_snapshot_run.sh under cron for
+# over a day (set -u -> "HOME: unbound variable") - see its comment.
+export PATH="/root/.local/bin:$PATH"
 
 export FPL_TEAM_ID=742663
 export AIRSENAL_HOME=/root/airsenal_home_dashboard

@@ -7,7 +7,12 @@
 set -euo pipefail
 
 cd /root/airsenal_replay
-source "$HOME/.local/bin/env"
+# hardcoded PATH, not `source ~/.local/bin/env` - cron's environment
+# doesn't reliably set HOME, and that env script itself references $HOME
+# unguarded. Silently killed this exact script under cron (set -u ->
+# "HOME: unbound variable", before the log file even gets created) for
+# over a day.
+export PATH="/root/.local/bin:$PATH"
 
 export FPL_TEAM_ID=742663
 export AIRSENAL_HOME=/root/airsenal_home_dashboard
