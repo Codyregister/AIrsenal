@@ -158,10 +158,39 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
 .team2 .team-swatch, .team-swatch.team2 { background:#b06fed; }
 .team-strategy { color:#aaa; font-size:.9em; margin:.2em 0 1em 0; }
 .pending-card { border:1px dashed #444; border-radius:8px; padding:1.5em; color:#999; text-align:center; }
+.tabs { display:flex; gap:.3em; margin:1.5em 0 0 0; border-bottom:1px solid #333; }
+.tab-btn { background:none; border:none; color:#999; padding:.6em 1.3em; font-size:1em; cursor:pointer; border-bottom:2px solid transparent; font-family:inherit; }
+.tab-btn:hover { color:#ccc; }
+.tab-btn.active { color:#e6e6e6; font-weight:600; }
+.tab-btn[data-tab="team1"].active { border-bottom-color:#2f6fed; }
+.tab-btn[data-tab="team2"].active { border-bottom-color:#b06fed; }
+.tab-btn[data-tab="general"].active { border-bottom-color:#8fe3a3; }
+.tab-panel { display:none; }
+.tab-panel.active { display:block; }
 </style>
 </head>
 <body>
 <h1>AIrsenal Dashboard <span class="muted" style="font-size:.5em">generated {{ now }} (auto-refreshes every 5 min)</span></h1>
+
+<div class="tabs">
+  <button class="tab-btn" data-tab="general" onclick="showTab('general')">General</button>
+  {% for team in teams %}
+  <button class="tab-btn" data-tab="{{ team.key }}" onclick="showTab('{{ team.key }}')">{{ team.label }}</button>
+  {% endfor %}
+</div>
+
+<div id="tab-general" class="tab-panel">
+
+<h2>Season status</h2>
+<div class="grid">
+  {% for stat in ops_stats %}
+  <div class="card">
+    <div class="label">{{ stat.label }}</div>
+    <div class="stat {{ stat.cls }}">{{ stat.value }}</div>
+    {% if stat.note %}<div class="muted" style="font-size:.8em">{{ stat.note }}</div>{% endif %}
+  </div>
+  {% endfor %}
+</div>
 
 <h2>Head-to-head</h2>
 <p class="muted">Live 2-team A/B test of chip-timing strategy - see docs/chip_timing_spec.md &sect;9 for why (3-season replay favoured greedy, but the margin over auto was close enough to also want a live check).</p>
@@ -188,22 +217,58 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
     </div>
   </div>
   {% endif %}
+  <div class="muted" style="font-size:.85em; margin-top:.5em">See the {{ team.label }} tab above for full detail.</div>
 </div>
 {% endfor %}
 </div>
 
-<h2>Ops status</h2>
-<div class="grid">
-  {% for stat in ops_stats %}
-  <div class="card">
-    <div class="label">{{ stat.label }}</div>
-    <div class="stat {{ stat.cls }}">{{ stat.value }}</div>
-    {% if stat.note %}<div class="muted" style="font-size:.8em">{{ stat.note }}</div>{% endif %}
-  </div>
-  {% endfor %}
+<h2>Price change momentum</h2>
+<p class="muted">Net transfers since the last snapshot, ranked - a <b>momentum indicator, not a calibrated rise/fall prediction</b>. Backtesting a simple threshold against real historical data found weak precision (see airsenal/framework/price_change.py's docstring) - treat this as "who's moving", not "who will change price". League-wide, not team-specific - sourced from {{ price_snapshot_team_label }}'s database (wherever the price-snapshot cron writes).</p>
+{% if price_momentum_error %}
+<p class="err">{{ price_momentum_error }}</p>
+{% elif not price_movers %}
+<p class="muted">No momentum data yet - needs at least two daily snapshots (see tools/price_change_snapshot_run.sh, runs every 4 hours). Check back once that's been running for a day or more.</p>
+{% else %}
+<table>
+<tr><th>Player</th><th>Price</th><th>Net transfers</th><th>Momentum</th><th>Owned by</th><th>Status</th></tr>
+{% for p in price_movers %}
+<tr><td>{{ p.name }}{% if p.in_squad_keys %} <span class="tag play">{{ p.in_squad_keys|join(', ')|upper }}</span>{% endif %}</td><td>&pound;{{ p.price / 10 }}m</td><td>{{ "%+d"|format(p.net_transfers_today) }}</td><td>{{ "%+.2f"|format(p.momentum_pct) }}%</td><td>{{ p.selected_by_percent }}%</td><td class="muted">{{ p.status }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>Replay validation results</h2>
+{% if not replay_by_season %}
+<p class="muted">No replay results found yet.</p>
+{% else %}
+<p class="muted">off/greedy/auto chip-strategy comparison from season replays (see docs/chip_timing_spec.md &sect;4.4/&sect;9). "greedy" = chips playable any week; "auto" = the decision-rule recommender at the given &lambda;.</p>
+<table>
+<tr><th>Season</th>{% for c in replay_configs %}<th>{{ c }}</th>{% endfor %}</tr>
+{% for season, rows in replay_by_season.items()|sort %}
+<tr><td>{{ season }}</td>
+{% for c in replay_configs %}
+{% if c in rows %}<td>{{ rows[c].total_actual_points }}<span class="muted"> ({{ "%.0f"|format(rows[c].total_expected_points) }} pred)</span></td>
+{% else %}<td class="muted">-</td>{% endif %}
+{% endfor %}
+</tr>
+{% endfor %}
+<tr style="border-top:2px solid #444"><td><b>Combined</b></td>
+{% for c in replay_configs %}
+{% if c in replay_combined %}
+<td><b class="{{ 'ok' if c == best_combined_config else '' }}">{{ replay_combined[c].actual }}</b>
+{% if replay_combined[c].seasons < replay_by_season|length %}<span class="muted"> ({{ replay_combined[c].seasons }}/{{ replay_by_season|length }} seasons)</span>{% endif %}
+</td>
+{% else %}<td class="muted">-</td>{% endif %}
+{% endfor %}
+</tr>
+</table>
+<p class="muted" style="font-size:.85em">All runs use reduced-fidelity settings (num_iterations=15, weeks_ahead=2) for tractability - see docs/chip_timing_spec.md &sect;9 for the full methodology, caveats, and final conclusion.</p>
+{% endif %}
+
 </div>
 
 {% for team in teams %}
+<div id="tab-{{ team.key }}" class="tab-panel">
 <h2><span class="team-swatch {{ team.key }}"></span> {{ team.label }} <span class="muted" style="font-size:.6em">{{ team.strategy }}</span></h2>
 {% if not team.configured %}
 <div class="pending-card">{{ team.not_configured_reason }}</div>
@@ -318,50 +383,24 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
 {% endif %}
 
 {% endif %}
+</div>
 {% endfor %}
 
-<h2>Price change momentum</h2>
-<p class="muted">Net transfers since the last snapshot, ranked - a <b>momentum indicator, not a calibrated rise/fall prediction</b>. Backtesting a simple threshold against real historical data found weak precision (see airsenal/framework/price_change.py's docstring) - treat this as "who's moving", not "who will change price". League-wide, not team-specific - sourced from {{ price_snapshot_team_label }}'s database (wherever the price-snapshot cron writes).</p>
-{% if price_momentum_error %}
-<p class="err">{{ price_momentum_error }}</p>
-{% elif not price_movers %}
-<p class="muted">No momentum data yet - needs at least two daily snapshots (see tools/price_change_snapshot_run.sh, runs every 4 hours). Check back once that's been running for a day or more.</p>
-{% else %}
-<table>
-<tr><th>Player</th><th>Price</th><th>Net transfers</th><th>Momentum</th><th>Owned by</th><th>Status</th></tr>
-{% for p in price_movers %}
-<tr><td>{{ p.name }}{% if p.in_squad_keys %} <span class="tag play">{{ p.in_squad_keys|join(', ')|upper }}</span>{% endif %}</td><td>&pound;{{ p.price / 10 }}m</td><td>{{ "%+d"|format(p.net_transfers_today) }}</td><td>{{ "%+.2f"|format(p.momentum_pct) }}%</td><td>{{ p.selected_by_percent }}%</td><td class="muted">{{ p.status }}</td></tr>
-{% endfor %}
-</table>
-{% endif %}
-
-<h2>Replay validation results</h2>
-{% if not replay_by_season %}
-<p class="muted">No replay results found yet.</p>
-{% else %}
-<p class="muted">off/greedy/auto chip-strategy comparison from season replays (see docs/chip_timing_spec.md &sect;4.4/&sect;9). "greedy" = chips playable any week; "auto" = the decision-rule recommender at the given &lambda;.</p>
-<table>
-<tr><th>Season</th>{% for c in replay_configs %}<th>{{ c }}</th>{% endfor %}</tr>
-{% for season, rows in replay_by_season.items()|sort %}
-<tr><td>{{ season }}</td>
-{% for c in replay_configs %}
-{% if c in rows %}<td>{{ rows[c].total_actual_points }}<span class="muted"> ({{ "%.0f"|format(rows[c].total_expected_points) }} pred)</span></td>
-{% else %}<td class="muted">-</td>{% endif %}
-{% endfor %}
-</tr>
-{% endfor %}
-<tr style="border-top:2px solid #444"><td><b>Combined</b></td>
-{% for c in replay_configs %}
-{% if c in replay_combined %}
-<td><b class="{{ 'ok' if c == best_combined_config else '' }}">{{ replay_combined[c].actual }}</b>
-{% if replay_combined[c].seasons < replay_by_season|length %}<span class="muted"> ({{ replay_combined[c].seasons }}/{{ replay_by_season|length }} seasons)</span>{% endif %}
-</td>
-{% else %}<td class="muted">-</td>{% endif %}
-{% endfor %}
-</tr>
-</table>
-<p class="muted" style="font-size:.85em">All runs use reduced-fidelity settings (num_iterations=15, weeks_ahead=2) for tractability - see docs/chip_timing_spec.md &sect;9 for the full methodology, caveats, and final conclusion.</p>
-{% endif %}
+<script>
+function showTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(function (el) { el.classList.remove('active'); });
+  document.querySelectorAll('.tab-btn').forEach(function (el) { el.classList.remove('active'); });
+  var panel = document.getElementById('tab-' + name);
+  var btn = document.querySelector('.tab-btn[data-tab="' + name + '"]');
+  if (!panel || !btn) { name = 'general'; panel = document.getElementById('tab-general'); btn = document.querySelector('.tab-btn[data-tab="general"]'); }
+  panel.classList.add('active');
+  btn.classList.add('active');
+  localStorage.setItem('airsenal_dashboard_tab', name);
+}
+// page auto-refreshes every 5 min (see <meta refresh> above) - restore
+// whichever tab was open rather than always jumping back to General.
+showTab(localStorage.getItem('airsenal_dashboard_tab') || 'general');
+</script>
 
 </body>
 </html>
@@ -622,6 +661,32 @@ def _load_simulated_season_performance(
     return rows, None
 
 
+def _load_next_deadline(next_gw: int) -> tuple[str | None, str | None]:
+    """Transfer deadline for the given gameweek, from the public
+    bootstrap-static endpoint (no login needed - see
+    FPLDataFetcher.get_event_data). Returns (formatted_value, note) - both
+    None if it couldn't be fetched (e.g. no network from this host)."""
+    try:
+        event_data = fetcher.get_event_data()
+        deadline_raw = event_data.get(next_gw, {}).get("deadline")
+        if not deadline_raw:
+            return None, "Not published yet"
+        deadline = datetime.fromisoformat(deadline_raw.replace("Z", "+00:00"))
+        now_utc = datetime.now(deadline.tzinfo)
+        delta = deadline - now_utc
+        if delta.total_seconds() <= 0:
+            return deadline.strftime("%a %d %b %H:%M UTC"), "Passed"
+        days, hours = delta.days, delta.seconds // 3600
+        countdown = (
+            f"{days}d {hours}h" if days else f"{hours}h {(delta.seconds % 3600) // 60}m"
+        )
+        return deadline.strftime("%a %d %b %H:%M UTC"), f"in {countdown}"
+    except Exception as e:
+        # best-effort informational stat (e.g. no network from this host) -
+        # any failure just hides the value rather than breaking the page
+        return None, str(e)
+
+
 def _tmux_replay_status():
     try:
         out = subprocess.run(
@@ -877,6 +942,16 @@ def index():
         )
     ops_stats.append({"label": "Next GW", "value": NEXT_GAMEWEEK, "cls": "ok"})
     ops_stats.append({"label": "Season", "value": CURRENT_SEASON, "cls": "ok"})
+
+    deadline_value, deadline_note = _load_next_deadline(NEXT_GAMEWEEK)
+    ops_stats.append(
+        {
+            "label": f"GW{NEXT_GAMEWEEK} deadline",
+            "value": deadline_value or "-",
+            "cls": "ok" if deadline_value else "muted",
+            "note": deadline_note,
+        }
+    )
 
     replay_status, replay_cls, replay_note = _tmux_replay_status()
     ops_stats.append(
