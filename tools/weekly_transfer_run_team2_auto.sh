@@ -1,26 +1,18 @@
 #!/bin/bash
-# Weekly automated transfer suggestion run for AIrsenal - Team 2 (pending
-# FPL_TEAM_ID), running the "auto" chip-timing strategy at risk_lambda=0.5
-# (our best candidate from replay testing). This is the other arm of a live
-# A/B test against Team 1 (742663, greedy) - see TODO.md for the replay
-# evidence that motivated the comparison.
-#
-# NOT yet scheduled in cron: FPL_TEAM_ID_TEAM2 below is a placeholder.
-# Once the second FPL account exists, fill in its real team ID, seed a
-# dedicated AIRSENAL_HOME DB for it (fill_db_init + an initial squad build,
-# same as was done for team 1), then add this script to crontab alongside
-# weekly_transfer_run_team1_greedy.sh.
+# Weekly automated transfer suggestion run for AIrsenal - Team 2 (872695),
+# running the "auto" chip-timing strategy at risk_lambda=0.5 (our best
+# candidate from replay testing). This is the other arm of a live A/B test
+# against Team 1 (742663, greedy) - see TODO.md for the replay evidence
+# that motivated the comparison. Team 2's DB was seeded 2026-08-12 with an
+# exact copy of Team 1's initial squad (not an independent GA build), so
+# the comparison isolates chip-timing strategy as the only variable.
 #
 # Suggestion-only: NEVER pass --apply_transfers or --clean here. Surfaced
 # on the dashboard (tools/dashboard_app.py) - nothing here touches the
 # live FPL team.
 set -euo pipefail
 
-FPL_TEAM_ID_TEAM2="REPLACE_ME_WITH_REAL_TEAM_ID"
-if [ "$FPL_TEAM_ID_TEAM2" = "REPLACE_ME_WITH_REAL_TEAM_ID" ]; then
-  echo "weekly_transfer_run_team2_auto.sh: FPL_TEAM_ID_TEAM2 not set yet - skipping." >&2
-  exit 0
-fi
+FPL_TEAM_ID_TEAM2=872695
 
 cd /root/airsenal_replay
 # hardcoded PATH, not `source ~/.local/bin/env` - cron's environment
