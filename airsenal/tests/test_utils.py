@@ -5,7 +5,7 @@ test some db access helper functions
 import pytest
 
 from airsenal.conftest import TEST_PAST_SEASON, past_data_session_scope, session_scope
-from airsenal.framework.schema import Fixture, Player, Result
+from airsenal.framework.schema import Fixture, Player, Result, Transaction
 from airsenal.framework.utils import (
     get_gameweek_by_date,
     get_last_complete_gameweek_in_db,
@@ -14,6 +14,7 @@ from airsenal.framework.utils import (
     get_player_name,
     get_reference_date_for_gameweek,
     get_return_gameweek_by_date,
+    has_local_squad_history,
 )
 
 
@@ -108,3 +109,37 @@ def test_get_last_complete_gameweek_in_db():
     with past_data_session_scope() as ts:
         gw = get_last_complete_gameweek_in_db(season=TEST_PAST_SEASON, dbsession=ts)
         assert gw == 5
+
+
+def test_has_local_squad_history():
+    """Regression test: airsenal_run_pipeline used to decide "brand new
+    team, build a fresh squad" purely from get_entry_start_gameweek, which
+    can't distinguish a genuinely new team from one that already has a
+    squad recorded locally but the season hasn't started yet (its lookup
+    loop never runs pre-season - see its docstring) - so it silently
+    discarded and rebuilt an existing squad every single pipeline run
+    during the whole pre-season period. has_local_squad_history is the
+    extra check that fixes this."""
+    season = "9906"
+    fpl_team_id = 555504
+    assert has_local_squad_history(fpl_team_id, season=season) is False
+
+    with session_scope() as ts:
+        t = Transaction()
+        t.player_id = 1
+        t.gameweek = 1
+        t.bought_or_sold = 1
+        t.season = season
+        t.time = "2026-08-01T12:00:00"
+        t.tag = "test"
+        t.price = 50
+        t.free_hit = 0
+        t.fpl_team_id = fpl_team_id
+        ts.add(t)
+        ts.commit()
+
+        assert has_local_squad_history(fpl_team_id, season=season, dbsession=ts) is True
+
+    # a different team/season with no transactions of its own is unaffected
+    assert has_local_squad_history(555505, season=season) is False
+    assert has_local_squad_history(fpl_team_id, season="9907") is False

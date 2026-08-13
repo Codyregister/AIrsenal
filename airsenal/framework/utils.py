@@ -400,6 +400,36 @@ def get_entry_start_gameweek(
     return NEXT_GAMEWEEK
 
 
+def has_local_squad_history(
+    fpl_team_id: int, season: str = CURRENT_SEASON, dbsession: Session = session
+) -> bool:
+    """
+    Whether the local database already has any recorded Transaction rows for
+    this team/season - i.e. AIrsenal already knows a starting squad for it,
+    even if the live API has no picks history to confirm it yet.
+
+    Needed because get_entry_start_gameweek can't distinguish "genuinely new
+    team" from "already built a squad locally, season just hasn't started
+    yet": its lookup loop is `while starting_gw < NEXT_GAMEWEEK`, which never
+    runs pre-season (NEXT_GAMEWEEK == 1), so it always falls through to
+    `return NEXT_GAMEWEEK` regardless of local state - callers that use it to
+    decide "build a brand new squad vs. optimise the existing one" (e.g.
+    airsenal_run_pipeline.py) need this as an extra check, or they'll
+    silently discard and replace an existing squad every run during the
+    whole pre-season period.
+    """
+    return (
+        dbsession.scalars(
+            select(Transaction)
+            .where(
+                Transaction.fpl_team_id == fpl_team_id, Transaction.season == season
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
 def get_free_transfers(
     fpl_team_id: int | None = None,
     gameweek: int | None = None,

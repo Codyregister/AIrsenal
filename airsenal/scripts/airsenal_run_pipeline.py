@@ -20,6 +20,7 @@ from airsenal.framework.utils import (
     get_gameweeks_array,
     get_latest_prediction_tag,
     get_past_seasons,
+    has_local_squad_history,
     parse_team_model_from_str,
 )
 from airsenal.scripts.fill_db_init import check_clean_db, make_init_db
@@ -254,7 +255,11 @@ def run_pipeline(
             raise RuntimeError(msg)
         click.echo("Prediction complete..")
 
-        if get_entry_start_gameweek(fpl_team_id, fetcher) == NEXT_GAMEWEEK:
+        is_new_team = (
+            not has_local_squad_history(fpl_team_id, CURRENT_SEASON, dbsession)
+            and get_entry_start_gameweek(fpl_team_id, fetcher) == NEXT_GAMEWEEK
+        )
+        if is_new_team:
             click.echo("Generating a squad..")
             new_squad_ok = run_make_squad(gw_range, fpl_team_id, dbsession)
             if not new_squad_ok:
