@@ -66,9 +66,12 @@ validation write-up; `airsenal/framework/chip_timing.py`,
 everywhere — replay evidence across all 3 available seasons doesn't support
 flipping it, so the automated weekly job runs `greedy` instead (see
 `tools/weekly_transfer_run_team1_greedy.sh`), and a live 2-team A/B test
-(`greedy` vs `auto` λ=0.5) is running as a further, non-replay check —
-Team 2 is scaffolded but pending a real second FPL account
-(`tools/weekly_transfer_run_team2_auto.sh`):
+(`greedy` vs `auto` λ=0.5) is running as a further, non-replay check.
+**Both teams active as of 2026-08-12** (742663 greedy,
+`tools/weekly_transfer_run_team1_greedy.sh`; 872695 auto,
+`tools/weekly_transfer_run_team2_auto.sh`) — Team 2's squad was copied
+exactly from Team 1's, not independently optimised, so the comparison
+isolates chip strategy as the only variable:
 
 Replay comparison (off/greedy/auto, `airsenal_replay_season`, GW1-19, reduced
 GA fidelity for tractability — `num_iterations=15`, `weeks_ahead=2`), combined
