@@ -639,20 +639,40 @@ def run_optimization(
     print(f"Running optimization with fpl_team_id {fpl_team_id}")
     use_api = season == CURRENT_SEASON and not is_replay
     try:
-        # get_squad_from_transactions filters Transaction.gameweek < next_gw,
-        # so next_gw=1 would exclude gameweek 1's own transactions (the
-        # initial squad itself, recorded at gameweek=1) - same GW1-boundary
-        # edge case worked around elsewhere (e.g. dashboard_app.py's squad
-        # panel); only matters for gameweeks[0]==1, where the squad hasn't
-        # changed since then anyway, so gameweek 2 is still the right squad.
         starting_squad = get_starting_squad(
-            next_gw=max(gameweeks[0], 2),
+            next_gw=gameweeks[0],
             season=season,
             fpl_team_id=fpl_team_id,
             use_api=use_api,
             apifetcher=fetcher,
         )
     except (ValueError, TypeError):
+        # get_squad_from_transactions filters Transaction.gameweek <
+        # next_gw, so next_gw=1 excludes gameweek 1's own transactions
+        # (the initial squad itself, recorded at gameweek=1) - same
+        # GW1-boundary edge case worked around elsewhere (e.g.
+        # dashboard_app.py's squad panel). Can't pass next_gw=2 to the
+        # call above directly: get_starting_squad's use_api path requires
+        # next_gw == NEXT_GAMEWEEK exactly and raises before ever reaching
+        # the DB fallback, so retry the DB reconstruction on its own,
+        # skipping the API attempt - we already know local history exists
+        # (has_local_squad_history above), so this isn't a "genuinely no
+        # squad" case at gameweeks[0] == 1.
+        if gameweeks[0] == 1:
+            try:
+                starting_squad = get_starting_squad(
+                    next_gw=2,
+                    season=season,
+                    fpl_team_id=fpl_team_id,
+                    use_api=False,
+                    apifetcher=fetcher,
+                )
+            except (ValueError, TypeError):
+                starting_squad = None
+        else:
+            starting_squad = None
+
+    if starting_squad is None:
         # first week for this squad?
         print(f"No existing squad or transfers found for team_id {fpl_team_id}")
         print("Will suggest a new starting squad:")

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from airsenal.framework.season import CURRENT_SEASON
 from airsenal.framework.squad import Squad
 from airsenal.scripts import fill_transfersuggestion_table as fts
 
@@ -65,7 +66,7 @@ def test_gameweek_one_with_existing_squad_does_not_rebuild_from_scratch(
         fts.run_optimization(
             gameweeks=[1, 2, 3],
             tag="tag",
-            season="2627",
+            season=CURRENT_SEASON,
             fpl_team_id=742663,
             num_thread=1,
         )
@@ -87,7 +88,7 @@ def test_gameweek_one_with_no_squad_history_still_builds_from_scratch(monkeypatc
     result_squad, best_strategy = fts.run_optimization(
         gameweeks=[1, 2, 3],
         tag="tag",
-        season="2627",
+        season=CURRENT_SEASON,
         fpl_team_id=742663,
         num_thread=1,
     )
@@ -95,6 +96,47 @@ def test_gameweek_one_with_no_squad_history_still_builds_from_scratch(monkeypatc
     fill_initial_squad_mock.assert_called_once()
     assert result_squad is squad
     assert best_strategy is None
+
+
+def test_gameweek_one_retries_db_reconstruction_when_first_call_excludes_it(
+    process_calls, monkeypatch
+):
+    """The exact failure seen in production: get_starting_squad(next_gw=1,
+    use_api=True) raises because get_squad_from_transactions filters
+    Transaction.gameweek < next_gw, excluding gameweek 1's own
+    transactions - even though local squad history genuinely exists. Must
+    retry with next_gw=2 (use_api=False) rather than treating this as "no
+    squad", and must NOT just pass next_gw=2 to the original call (that
+    breaks get_starting_squad's use_api validation, which requires
+    next_gw == NEXT_GAMEWEEK exactly - a second real bug hit fixing the
+    first one)."""
+    monkeypatch.setattr(fts, "has_local_squad_history", lambda *a, **k: True)
+    monkeypatch.setattr(fts, "get_entry_start_gameweek", lambda *a, **k: -999)
+    fill_initial_squad_mock = MagicMock()
+    monkeypatch.setattr(fts, "fill_initial_squad", fill_initial_squad_mock)
+
+    calls = []
+
+    def fake_get_starting_squad(next_gw, use_api=False, **kwargs):
+        calls.append((next_gw, use_api))
+        if next_gw == 1:
+            msg = "No transactions in database for team ID 742663"
+            raise ValueError(msg)
+        return Squad()
+
+    monkeypatch.setattr(fts, "get_starting_squad", fake_get_starting_squad)
+
+    with pytest.raises(ValueError, match="Failed to find a strategy"):
+        fts.run_optimization(
+            gameweeks=[1, 2, 3],
+            tag="tag",
+            season=CURRENT_SEASON,
+            fpl_team_id=742663,
+            num_thread=1,
+        )
+
+    fill_initial_squad_mock.assert_not_called()
+    assert calls == [(1, True), (2, False)]
 
 
 def test_gameweek_one_with_squad_history_but_via_entry_start_gameweek(monkeypatch):
@@ -115,7 +157,7 @@ def test_gameweek_one_with_squad_history_but_via_entry_start_gameweek(monkeypatc
         fts.run_optimization(
             gameweeks=[10, 11, 12],
             tag="tag",
-            season="2627",
+            season=CURRENT_SEASON,
             fpl_team_id=742663,
             num_thread=1,
         )
