@@ -59,6 +59,7 @@ from airsenal.framework.utils import (
     get_gameweeks_array,
     get_latest_prediction_tag,
     get_player_name,
+    has_local_squad_history,
 )
 from airsenal.scripts.chip_report import build_chip_report, format_report_text
 from airsenal.scripts.squad_builder import fill_initial_squad
@@ -608,9 +609,18 @@ def run_optimization(
         )
         raise ValueError(msg)
 
-    # see if we are at the start of a season, or
-    if gameweeks[0] == 1 or gameweeks[0] == get_entry_start_gameweek(
-        fpl_team_id, apifetcher=fetcher
+    # see if we are at the start of a season, or a new team - but not if we
+    # already have a squad recorded locally for this team/season (e.g. an
+    # initial squad built earlier this pre-season, or a replay resuming from
+    # gameweek 1): gameweeks[0] == 1 alone doesn't mean "no squad exists yet",
+    # it just means this optimisation horizon starts at gameweek 1 - real
+    # incident, not hypothetical: this discarded and rebuilt a deliberately
+    # -built squad on every single automated run during pre-season, even
+    # after the equivalent check was fixed one level up in
+    # airsenal_run_pipeline.py, because this is a separate check.
+    if not has_local_squad_history(fpl_team_id, season) and (
+        gameweeks[0] == 1
+        or gameweeks[0] == get_entry_start_gameweek(fpl_team_id, apifetcher=fetcher)
     ):
         print(
             "This is the start of the season or a new team - will make a squad "
@@ -629,8 +639,14 @@ def run_optimization(
     print(f"Running optimization with fpl_team_id {fpl_team_id}")
     use_api = season == CURRENT_SEASON and not is_replay
     try:
+        # get_squad_from_transactions filters Transaction.gameweek < next_gw,
+        # so next_gw=1 would exclude gameweek 1's own transactions (the
+        # initial squad itself, recorded at gameweek=1) - same GW1-boundary
+        # edge case worked around elsewhere (e.g. dashboard_app.py's squad
+        # panel); only matters for gameweeks[0]==1, where the squad hasn't
+        # changed since then anyway, so gameweek 2 is still the right squad.
         starting_squad = get_starting_squad(
-            next_gw=gameweeks[0],
+            next_gw=max(gameweeks[0], 2),
             season=season,
             fpl_team_id=fpl_team_id,
             use_api=use_api,
