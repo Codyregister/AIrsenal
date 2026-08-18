@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import secrets
+import sys
 import time
 import traceback
 import uuid
@@ -136,6 +137,19 @@ class FPLDataFetcher:
             )
             return
         if (not self.FPL_LOGIN) or (not self.FPL_PASSWORD):
+            if not sys.stdin.isatty():
+                # No credentials configured and nothing interactive to
+                # prompt - don't block on input() forever. Real incident:
+                # a scheduled cron job hung for ~24 hours waiting on this
+                # exact prompt with no one able to answer it (a code path
+                # that had never previously been reached live got exercised
+                # for the first time after an unrelated bug fix).
+                self._set_login_failed(
+                    msg="No FPL_LOGIN/FPL_PASSWORD configured and not running "
+                    "interactively (e.g. cron) - skipping login rather than "
+                    "prompting, which would block forever."
+                )
+                return
             do_login = ""
             while do_login.lower() not in ["y", "n"]:
                 do_login = input(

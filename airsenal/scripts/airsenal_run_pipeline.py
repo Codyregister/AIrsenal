@@ -233,13 +233,28 @@ def run_pipeline(
             update_ok = False
 
         if not update_ok:
-            confirmed = input(
-                "The database update failed. AIrsenal can continue using the latest "
-                "status of its database but the results may be outdated or invalid.\n"
-                "Do you want to continue? [y/n] "
-            )
-            if confirmed == "n":
-                sys.exit()
+            if sys.stdin.isatty():
+                confirmed = input(
+                    "The database update failed. AIrsenal can continue using the "
+                    "latest status of its database but the results may be outdated "
+                    "or invalid.\nDo you want to continue? [y/n] "
+                )
+                if confirmed == "n":
+                    sys.exit()
+            else:
+                # no one to answer a prompt in a non-interactive context
+                # (e.g. cron) - blocking on input() here would hang
+                # forever, same real incident as the login prompt fixed
+                # in data_fetcher.py. This is suggestion-only automation
+                # (nothing gets applied to the live team), so continuing
+                # with slightly stale data is the safer failure mode than
+                # silently hanging and producing nothing at all.
+                warnings.warn(
+                    "Database update failed and running non-interactively - "
+                    "continuing with the existing database rather than "
+                    "prompting (which would block forever).",
+                    stacklevel=2,
+                )
         else:
             click.echo("Database update complete..")
 

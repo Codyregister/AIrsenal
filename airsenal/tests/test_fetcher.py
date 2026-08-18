@@ -18,6 +18,48 @@ def test_instantiate_fetchers():
     assert fpl
 
 
+def test_login_does_not_block_when_not_interactive(monkeypatch):
+    """Regression test for a real incident (2026-08-17): a scheduled cron
+    job with no FPL_LOGIN/FPL_PASSWORD configured hung for ~24 hours on
+    login()'s "Would you like to login?" input() prompt, with no one able
+    to answer it. login() must fail gracefully instead of blocking when
+    stdin isn't an interactive terminal."""
+    fpl = FPLDataFetcher()
+    fpl.FPL_LOGIN = None
+    fpl.FPL_PASSWORD = None
+    fpl.logged_in = False
+    fpl.login_failed = False
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def _blocking_input(*_a, **_k):
+        msg = "login() must not call input() when stdin is not interactive"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("builtins.input", _blocking_input)
+
+    fpl.login()
+
+    assert fpl.login_failed is True
+    assert fpl.logged_in is False
+
+
+def test_login_still_prompts_when_interactive(monkeypatch):
+    """Sanity check the other half of the fix: an actual interactive
+    session (a real terminal, a human present) must still get the prompt -
+    this must not regress into never being able to log in interactively."""
+    fpl = FPLDataFetcher()
+    fpl.FPL_LOGIN = None
+    fpl.FPL_PASSWORD = None
+    fpl.logged_in = False
+    fpl.login_failed = False
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "n")
+
+    fpl.login()
+
+    assert fpl.login_failed is True
+
+
 def test_get_summary_data():
     """
     get summary of all players' data for this season.
