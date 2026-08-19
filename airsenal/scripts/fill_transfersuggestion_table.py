@@ -647,30 +647,11 @@ def run_optimization(
             apifetcher=fetcher,
         )
     except (ValueError, TypeError):
-        # get_squad_from_transactions filters Transaction.gameweek <
-        # next_gw, so next_gw=1 excludes gameweek 1's own transactions
-        # (the initial squad itself, recorded at gameweek=1) - same
-        # GW1-boundary edge case worked around elsewhere (e.g.
-        # dashboard_app.py's squad panel). Can't pass next_gw=2 to the
-        # call above directly: get_starting_squad's use_api path requires
-        # next_gw == NEXT_GAMEWEEK exactly and raises before ever reaching
-        # the DB fallback, so retry the DB reconstruction on its own,
-        # skipping the API attempt - we already know local history exists
-        # (has_local_squad_history above), so this isn't a "genuinely no
-        # squad" case at gameweeks[0] == 1.
-        if gameweeks[0] == 1:
-            try:
-                starting_squad = get_starting_squad(
-                    next_gw=2,
-                    season=season,
-                    fpl_team_id=fpl_team_id,
-                    use_api=False,
-                    apifetcher=fetcher,
-                )
-            except (ValueError, TypeError):
-                starting_squad = None
-        else:
-            starting_squad = None
+        # The GW1-boundary edge case (get_squad_from_transactions excluding
+        # gameweek 1's own transactions) is now handled centrally in
+        # get_squad_from_transactions itself, so a failure here means there
+        # genuinely is no reconstructable squad.
+        starting_squad = None
 
     if starting_squad is None:
         # first week for this squad?

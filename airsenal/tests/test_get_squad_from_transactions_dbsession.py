@@ -6,6 +6,17 @@ it impossible to reconstruct a squad against a second, independent
 database (e.g. a second FPL team's own AIRSENAL_HOME) from within the same
 process. Both now accept and use an explicit dbsession.
 
+Second follow-up regression (2026-08-19): get_squad_from_transactions filters
+`Transaction.gameweek < gameweek`. There's no gameweek 0, so a brand new
+squad's initial "buy" transactions are recorded at gameweek=1 - querying
+"squad for gameweek 1" therefore always excluded them and looked
+indistinguishable from "no squad exists". This crashed a live pre-season
+run inside print_team_for_next_gw (fill_transfersuggestion_table.py), which
+calls get_starting_squad(next_gw=1, ...) with no fallback of its own -
+two other call sites (run_optimization, dashboard_app.py) had already
+worked around the same boundary ad-hoc. Fixed once, centrally, by treating
+gameweek=1 queries as if gameweek=2 was requested.
+
 Follow-up regression (2026-08-18): threading dbsession through
 unconditionally (defaulting to the module-global `session`, not None)
 meant every CandidatePlayer in the returned Squad got a live SQLAlchemy
@@ -146,6 +157,24 @@ def test_default_call_produces_picklable_players(fill_players, monkeypatch):
         )
     assert squad.players[0].dbsession is None
     pickle.dumps(squad)  # must not raise
+
+
+def test_gameweek_one_query_includes_gameweek_one_transactions(fill_players):
+    """The second follow-up regression: a brand new squad's initial buy
+    transactions are recorded at gameweek=1 (there's no gameweek 0).
+    Querying get_squad_from_transactions(gameweek=1, ...) must still
+    return them - previously the strict `gameweek < 1` filter excluded
+    them and raised ValueError, indistinguishable from "no squad"."""
+    fpl_team_id = 555509
+    with session_scope() as ts:
+        _add_buy_transaction(ts, player_id=0, fpl_team_id=fpl_team_id, gameweek=1)
+        ts.commit()
+
+        squad = get_squad_from_transactions(
+            1, season=SEASON, fpl_team_id=fpl_team_id, dbsession=ts
+        )
+    assert len(squad.players) == 1
+    assert squad.players[0].player_id == 0
 
 
 def test_explicit_dbsession_call_attaches_it_to_players(fill_players):

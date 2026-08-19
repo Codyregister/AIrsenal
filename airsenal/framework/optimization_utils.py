@@ -170,13 +170,25 @@ def get_squad_from_transactions(
 
     # Don't include free hit transfers as they only apply for the week the
     # chip is activated
+    #
+    # There's no gameweek 0, so an initial squad build (a brand new team, or
+    # a fresh pre-season rebuild) records its "buy" transactions at
+    # gameweek=1 - those transactions ARE the squad for gameweek 1, not a
+    # transfer made during it. Querying "squad for gameweek 1" with a strict
+    # `< gameweek` filter therefore always excludes them and looks
+    # indistinguishable from "no squad exists yet". Real incident: this
+    # crashed a live pre-season run inside print_team_for_next_gw, which has
+    # no fallback of its own - two other call sites (run_optimization,
+    # dashboard_app.py) had already worked around the same boundary
+    # ad-hoc by retrying/requesting next_gw=2, so fix it once here instead.
+    gameweek_threshold = max(gameweek, 2)
     transactions = query_session.scalars(
         select(Transaction)
         .where(
             Transaction.fpl_team_id == fpl_team_id,
             Transaction.free_hit == 0,
             Transaction.season == season,
-            Transaction.gameweek < gameweek,
+            Transaction.gameweek < gameweek_threshold,
         )
         .order_by(Transaction.gameweek, Transaction.id)
     ).all()
