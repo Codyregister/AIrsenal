@@ -105,7 +105,7 @@ def get_starting_squad(
     fpl_team_id=None,
     use_api=False,
     apifetcher=fetcher,
-    dbsession=session,
+    dbsession=None,
 ):
     """
     use the transactions table in the db, or the API if requested
@@ -137,11 +137,26 @@ def get_starting_squad(
 
 
 def get_squad_from_transactions(
-    gameweek, season=CURRENT_SEASON, fpl_team_id=None, dbsession=session
+    gameweek, season=CURRENT_SEASON, fpl_team_id=None, dbsession=None
 ):
+    # Default is None, not the module-global `session`, and stays None
+    # below when passed on to add_player/remove_player unless the caller
+    # explicitly provided one - CandidatePlayer stores whatever dbsession
+    # it's given as a live instance attribute, which is fine for normal,
+    # single-process use (e.g. querying a specific team's database - see
+    # tools/dashboard_app.py) but breaks multiprocessing: a SQLAlchemy
+    # Session can't be pickled, and the tree-search optimiser in
+    # fill_transfersuggestion_table.py sends whole Squad objects (complete
+    # with their CandidatePlayers) across a multiprocessing Queue. Real
+    # incident: this crashed the first live (non-replay) run of that code
+    # path with `PicklingError: Can't pickle ... Session`, introduced when
+    # this function started threading dbsession through unconditionally.
+    # Querying still needs a real session regardless, so resolve that
+    # separately from what gets attached to the returned Squad's players.
+    query_session = dbsession if dbsession is not None else session
     if not fpl_team_id:
         # use the most recent transaction in the table
-        most_recent = dbsession.scalars(
+        most_recent = query_session.scalars(
             select(Transaction)
             .where(Transaction.free_hit == 0, Transaction.season == season)
             .order_by(Transaction.id.desc())
@@ -155,7 +170,7 @@ def get_squad_from_transactions(
 
     # Don't include free hit transfers as they only apply for the week the
     # chip is activated
-    transactions = dbsession.scalars(
+    transactions = query_session.scalars(
         select(Transaction)
         .where(
             Transaction.fpl_team_id == fpl_team_id,
