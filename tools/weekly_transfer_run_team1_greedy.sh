@@ -1,5 +1,5 @@
 #!/bin/bash
-# Weekly automated transfer suggestion run for AIrsenal - Team 1 (742663),
+# Weekly automated transfer suggestion run for AIrsenal - Team 1 (3178353),
 # running the "greedy" chip strategy (play a chip whenever the tree search
 # finds it optimal within the horizon, matching AIrsenal's original
 # pre-chip-timing default). This is one arm of a live A/B test against
@@ -18,7 +18,7 @@ cd /root/airsenal_replay
 # over a day (set -u -> "HOME: unbound variable") - see its comment.
 export PATH="/root/.local/bin:$PATH"
 
-export FPL_TEAM_ID=742663
+export FPL_TEAM_ID=3178353
 export AIRSENAL_HOME=/root/airsenal_home_dashboard
 
 LOG_DIR=/root/airsenal_replay/weekly_run_logs
@@ -29,7 +29,7 @@ LOG_FILE="$LOG_DIR/$(date +%Y%m%d_%H%M%S).log"
   echo "=== Weekly transfer run (team1_greedy) started $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
   uv run airsenal_run_pipeline \
     --weeks_ahead 3 \
-    --fpl_team_id 742663 \
+    --fpl_team_id 3178353 \
     --chip_strategy manual \
     --wildcard_week 0 \
     --free_hit_week 0 \

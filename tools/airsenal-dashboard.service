@@ -6,10 +6,10 @@ After=network.target
 Type=simple
 WorkingDirectory=/root/airsenal_replay
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=DASHBOARD_FPL_TEAM_ID=742663
-Environment=DASHBOARD_TEAM2_FPL_TEAM_ID=872695
+Environment=DASHBOARD_FPL_TEAM_ID=3178353
+Environment=DASHBOARD_TEAM2_FPL_TEAM_ID=3776647
 Environment=AIRSENAL_HOME=/root/airsenal_home_dashboard
-Environment=FPL_TEAM_ID=742663
+Environment=FPL_TEAM_ID=3178353
 ExecStart=/root/.local/bin/uv run python3 tools/dashboard_app.py
 Restart=on-failure
 RestartSec=5

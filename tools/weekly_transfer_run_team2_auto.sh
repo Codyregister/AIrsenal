@@ -1,8 +1,8 @@
 #!/bin/bash
-# Weekly automated transfer suggestion run for AIrsenal - Team 2 (872695),
+# Weekly automated transfer suggestion run for AIrsenal - Team 2 (3776647),
 # running the "auto" chip-timing strategy at risk_lambda=0.5 (our best
 # candidate from replay testing). This is the other arm of a live A/B test
-# against Team 1 (742663, greedy) - see TODO.md for the replay evidence
+# against Team 1 (3178353, greedy) - see TODO.md for the replay evidence
 # that motivated the comparison. Team 2's DB was seeded 2026-08-12 with an
 # exact copy of Team 1's initial squad (not an independent GA build), so
 # the comparison isolates chip-timing strategy as the only variable.
@@ -12,7 +12,7 @@
 # live FPL team.
 set -euo pipefail
 
-FPL_TEAM_ID_TEAM2=872695
+FPL_TEAM_ID_TEAM2=3776647
 
 cd /root/airsenal_replay
 # hardcoded PATH, not `source ~/.local/bin/env` - cron's environment

@@ -14,7 +14,9 @@ We have made a mini-league **"Prem-AI League"** for players using this software.
 The code to join is: **xoz7vm**.
 Hope to see your AI team there!! :)
 
-Our own AIrsenal team's ID for the 2025/26 season is **[742663](https://fantasy.premierleague.com/entry/742663/history)**.
+Upstream AIrsenal's team ID for the **2025/26** season was [742663](https://fantasy.premierleague.com/entry/742663/history). Note that FPL entry IDs are issued per season and are **not** stable year to year — 742663 belongs to an unrelated manager in 2026/27, so don't carry it forward.
+
+This fork's own teams for **2026/27** are **[3178353](https://fantasy.premierleague.com/entry/3178353/history)** (Team 1, `chip_strategy=manual`/greedy) and **[3776647](https://fantasy.premierleague.com/entry/3776647/history)** (Team 2, `chip_strategy=auto`, `risk_lambda=0.5`).
 
 ## Installation
 

@@ -80,7 +80,7 @@ TEAM_CONFIGS = [
         "fpl_team_id": (
             _env_int("DASHBOARD_TEAM1_FPL_TEAM_ID")
             or _env_int("DASHBOARD_FPL_TEAM_ID")
-            or 742663
+            or 3178353
         ),
         "airsenal_home": os.environ.get(
             "DASHBOARD_TEAM1_AIRSENAL_HOME", "/root/airsenal_home_dashboard"

@@ -14,7 +14,7 @@ cd /root/airsenal_replay
 # over a day.
 export PATH="/root/.local/bin:$PATH"
 
-export FPL_TEAM_ID=742663
+export FPL_TEAM_ID=3178353
 export AIRSENAL_HOME=/root/airsenal_home_dashboard
 
 LOG_DIR=/root/airsenal_replay/price_change_logs

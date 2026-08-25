@@ -83,7 +83,7 @@ Decided to live-test greedy vs. auto (λ=0.5) with two real FPL teams this
 season, since 2 seasons of replay evidence wasn't enough to call it (greedy
 2072 > auto 2065 > off 1970, combined actual points — see TODO.md §1, now
 superseded by the final 3-season result in docs/chip_timing_spec.md §9).
-Team 1 is the existing team (742663), switched to `chip_strategy=manual`
+Team 1 is the existing team (3178353), switched to `chip_strategy=manual`
 + all `*_week=0` (greedy) via `tools/weekly_transfer_run_team1_greedy.sh`.
 Team 2 (`chip_strategy=auto`, `risk_lambda=0.5`) is scaffolded in
 `tools/weekly_transfer_run_team2_auto.sh` but **still not active** — it

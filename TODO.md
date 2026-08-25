@@ -67,8 +67,8 @@ everywhere — replay evidence across all 3 available seasons doesn't support
 flipping it, so the automated weekly job runs `greedy` instead (see
 `tools/weekly_transfer_run_team1_greedy.sh`), and a live 2-team A/B test
 (`greedy` vs `auto` λ=0.5) is running as a further, non-replay check.
-**Both teams active as of 2026-08-12** (742663 greedy,
-`tools/weekly_transfer_run_team1_greedy.sh`; 872695 auto,
+**Both teams active as of 2026-08-12** (3178353 greedy,
+`tools/weekly_transfer_run_team1_greedy.sh`; 3776647 auto,
 `tools/weekly_transfer_run_team2_auto.sh`) — Team 2's squad was copied
 exactly from Team 1's, not independently optimised, so the comparison
 isolates chip strategy as the only variable:
