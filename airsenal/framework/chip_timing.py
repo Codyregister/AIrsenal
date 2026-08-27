@@ -49,6 +49,7 @@ from airsenal.framework.utils import (
     fetcher,
     get_fixture_teams,
     get_fixtures_for_gameweek,
+    get_last_complete_gameweek_in_db,
     get_max_gameweek,
     get_player,
     get_predicted_points_for_player,
@@ -319,13 +320,42 @@ WILDCARD_PROXY_HORIZON = (
     3  # GWs used for the in-horizon wildcard optimum-squad comparison
 )
 
-_team_model_cache: dict[tuple[str, int], object] = {}
-_captain_baseline_cache: dict[tuple[int, str, str], tuple[str | None, float]] = {}
+# Keyed on the *database* a session talks to, never on id(dbsession): CPython
+# recycles object addresses after garbage collection, so a short-lived session
+# (e.g. one created per web request) can land on a freed address and collide
+# with an unrelated entry. With two teams whose separate databases share a
+# season, that served one team a model fitted against the other team's data.
+_team_model_cache: dict[tuple[str, str, int | None], object] = {}
+_captain_baseline_cache: dict[
+    tuple[str, str, str, tuple[int, ...]], tuple[str | None, float]
+] = {}
+
+
+def _dbsession_cache_key(dbsession: Session) -> str | None:
+    """A stable identifier for the database behind a session, or None if it
+    can't be determined.
+
+    Callers must skip caching entirely on None rather than falling back to
+    id(dbsession) - see the note on _team_model_cache above.
+    """
+    try:
+        bind = dbsession.get_bind()
+    except Exception:
+        return None
+    url = getattr(bind, "url", None)
+    if url is None:
+        return None
+    text = str(url)
+    # Every in-memory SQLite database renders as the same URL despite being a
+    # genuinely separate database, so it can't identify one. Decline to cache
+    # rather than risk conflating two of them.
+    if ":memory:" in text or "mode=memory" in text:
+        return None
+    return text
 
 
 def _get_cached_team_model(season: str, dbsession: Session):
-    """Fit (once per season/session) and cache the team model used by the
-    long-range proxies below.
+    """Fit and cache the team model used by the long-range proxies below.
 
     Fitting a Dixon-Coles-style team model is the expensive part of using
     it - evaluating fixture probabilities from an already-fitted model is
@@ -335,12 +365,27 @@ def _get_cached_team_model(season: str, dbsession: Session):
     scratch. get_fitted_team_model only ever trains on completed Result
     rows regardless of the "gameweek" cutoff passed to it, so it doesn't
     matter which gameweek we happen to fit with first for a given
-    season/session.
+    season/database.
+
+    The last complete gameweek is part of the key so that a long-lived
+    process (e.g. the dashboard service) refits once new results land,
+    rather than serving a model fitted before the latest gameweek was
+    played for the rest of the season.
     """
-    key = (season, id(dbsession))
+    db_key = _dbsession_cache_key(dbsession)
+    if db_key is None:
+        return get_fitted_team_model(
+            season, get_max_gameweek(season, dbsession), dbsession
+        )
+    key = (season, db_key, get_last_complete_gameweek_in_db(season, dbsession))
     if key not in _team_model_cache:
         max_gw = get_max_gameweek(season, dbsession)
-        _team_model_cache[key] = get_fitted_team_model(season, max_gw, dbsession)
+        model = get_fitted_team_model(season, max_gw, dbsession)
+        # Only the newest fit for a season/database is ever asked for, so drop
+        # superseded ones instead of retaining a fitted model per gameweek.
+        for stale in [k for k in _team_model_cache if k[:2] == key[:2]]:
+            del _team_model_cache[stale]
+        _team_model_cache[key] = model
     return _team_model_cache[key]
 
 
@@ -385,12 +430,20 @@ def _best_captain_baseline(
     that average. Falls back to (None, PREMIUM_CAPTAIN_BASELINE_PTS) if the
     squad has no predictions at all (e.g. a brand new squad/season).
 
-    Cached per (squad, tag, season) since it doesn't depend on gw - without
-    caching, this would be recomputed (with a handful of DB queries each)
-    for every long-range gameweek evaluated.
+    Cached per (database, tag, season, squad composition) since it doesn't
+    depend on gw - without caching, this would be recomputed (with a handful
+    of DB queries each) for every long-range gameweek evaluated. The squad is
+    identified by its player ids rather than id(squad), which is unsafe as a
+    cache key (see the note on _team_model_cache); player ids are database
+    local, hence keying on the database too.
     """
-    key = (id(squad), tag, season)
-    if key in _captain_baseline_cache:
+    db_key = _dbsession_cache_key(dbsession)
+    key = (
+        None
+        if db_key is None
+        else (db_key, tag, season, tuple(sorted(p.player_id for p in squad.players)))
+    )
+    if key is not None and key in _captain_baseline_cache:
         return _captain_baseline_cache[key]
 
     best_team: str | None = None
@@ -410,7 +463,8 @@ def _best_captain_baseline(
         if best_team is None
         else (best_team, best_avg)
     )
-    _captain_baseline_cache[key] = result
+    if key is not None:
+        _captain_baseline_cache[key] = result
     return result
 
 

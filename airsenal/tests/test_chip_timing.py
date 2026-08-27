@@ -10,10 +10,14 @@ Tests for airsenal/framework/chip_timing.py:
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from airsenal.conftest import session_scope
+from airsenal.framework import chip_timing as ct
 from airsenal.framework.chip_timing import (
     ChipRecommendation,
     ChipValue,
@@ -431,3 +435,155 @@ def test_chip_recommendation_dataclass():
         values=[value],
     )
     assert rec.values == [value]
+
+
+# --- caching: keys must identify the database/squad, never object identity ---
+#
+# These caches were previously keyed on id(dbsession) / id(squad). CPython
+# recycles object addresses, so a short-lived session (the dashboard creates
+# one per team per request) both missed the cache constantly and could collide
+# with a freed address belonging to another team's database.
+
+
+class _FakeModel:
+    """Stands in for a fitted team model, tagged so tests can tell which
+    database it was fitted against."""
+
+    def __init__(self, label):
+        self.label = label
+
+
+def _file_session(path):
+    return sessionmaker(bind=create_engine(f"sqlite:///{path}"))()
+
+
+@pytest.fixture
+def two_file_dbs(tmp_path):
+    """Two sessions bound to two genuinely separate on-disk SQLite databases.
+
+    On-disk rather than in-memory because every in-memory SQLite database
+    renders as the same URL, which _dbsession_cache_key deliberately refuses
+    to treat as an identifier.
+    """
+    made = [_file_session(tmp_path / n) for n in ("team_a.db", "team_b.db")]
+    yield made[0], made[1]
+    for s in made:
+        s.close()
+
+
+@pytest.fixture
+def fit_calls(monkeypatch):
+    """Replace the expensive fit with a counter, and pin the freshness probe."""
+    calls = []
+
+    def fake_fit(season, gameweek, dbsession, **kwargs):
+        calls.append(dbsession)
+        return _FakeModel(str(dbsession.get_bind().url))
+
+    monkeypatch.setattr(ct, "get_fitted_team_model", fake_fit)
+    monkeypatch.setattr(ct, "get_max_gameweek", lambda *_: 38)
+    monkeypatch.setattr(ct, "get_last_complete_gameweek_in_db", lambda *_: 1)
+    ct._team_model_cache.clear()
+    yield calls
+    ct._team_model_cache.clear()
+
+
+def test_team_model_cache_does_not_mix_up_separate_databases(two_file_dbs, fit_calls):
+    sess_a, sess_b = two_file_dbs
+
+    model_a = ct._get_cached_team_model(CURRENT_SEASON, sess_a)
+    model_b = ct._get_cached_team_model(CURRENT_SEASON, sess_b)
+
+    assert len(fit_calls) == 2, "each database needs its own fit"
+    assert model_a is not model_b
+    assert "team_a.db" in model_a.label
+    assert "team_b.db" in model_b.label
+
+
+def test_team_model_cache_hits_for_a_new_session_to_the_same_database(
+    tmp_path, fit_calls
+):
+    """The dashboard builds a fresh Session per request; that must not refit."""
+    db = tmp_path / "same.db"
+
+    first = _file_session(db)
+    model_1 = ct._get_cached_team_model(CURRENT_SEASON, first)
+    first.close()
+    del first
+
+    second = _file_session(db)
+    model_2 = ct._get_cached_team_model(CURRENT_SEASON, second)
+    second.close()
+
+    assert len(fit_calls) == 1, (
+        "a second session to the same database must reuse the fit"
+    )
+    assert model_1 is model_2
+
+
+def test_team_model_cache_refits_when_new_results_land(
+    tmp_path, fit_calls, monkeypatch
+):
+    """A long-lived process must not serve a pre-gameweek fit all season."""
+    sess = _file_session(tmp_path / "adv.db")
+
+    ct._get_cached_team_model(CURRENT_SEASON, sess)
+    assert len(fit_calls) == 1
+
+    # another gameweek completes
+    monkeypatch.setattr(ct, "get_last_complete_gameweek_in_db", lambda *_: 2)
+    ct._get_cached_team_model(CURRENT_SEASON, sess)
+
+    assert len(fit_calls) == 2, "new results should invalidate the cached fit"
+    # and the superseded entry is dropped rather than accumulating
+    assert len(ct._team_model_cache) == 1
+    sess.close()
+
+
+def test_in_memory_database_is_not_used_as_a_cache_key(fit_calls):
+    """Two in-memory DBs share a URL, so caching must be declined, not guessed."""
+    a = sessionmaker(bind=create_engine("sqlite:///:memory:"))()
+    b = sessionmaker(bind=create_engine("sqlite:///:memory:"))()
+
+    assert ct._dbsession_cache_key(a) is None
+    ct._get_cached_team_model(CURRENT_SEASON, a)
+    ct._get_cached_team_model(CURRENT_SEASON, b)
+
+    assert len(fit_calls) == 2, "must refit rather than share between in-memory DBs"
+    assert ct._team_model_cache == {}
+    a.close()
+    b.close()
+
+
+def test_captain_baseline_cached_by_squad_composition_not_object_identity(
+    two_file_dbs, monkeypatch
+):
+    sess_a, _ = two_file_dbs
+    ct._captain_baseline_cache.clear()
+
+    lookups = []
+
+    def fake_preds(player_id, tag, season, dbsession):
+        lookups.append(player_id)
+        return {1: float(player_id)}
+
+    monkeypatch.setattr(ct, "get_predicted_points_for_player", fake_preds)
+
+    def squad_of(*ids):
+        return SimpleNamespace(
+            players=[SimpleNamespace(player_id=i, team=f"T{i}") for i in ids]
+        )
+
+    first = ct._best_captain_baseline(squad_of(1, 2), "tag", CURRENT_SEASON, sess_a)
+    n_after_first = len(lookups)
+
+    # a *different object* with the same players must hit the cache
+    second = ct._best_captain_baseline(squad_of(2, 1), "tag", CURRENT_SEASON, sess_a)
+    assert second == first
+    assert len(lookups) == n_after_first, "same composition should not recompute"
+
+    # a genuinely different squad must not
+    ct._best_captain_baseline(squad_of(1, 3), "tag", CURRENT_SEASON, sess_a)
+    assert len(lookups) > n_after_first
+
+    ct._captain_baseline_cache.clear()
