@@ -290,7 +290,9 @@ code { background:#1c2029; padding:.1em .4em; border-radius:4px; font-size:.85em
   </span>
   <table>
     <tr><th>GW</th><th>Expected gain</th><th>Method</th><th>Notes</th></tr>
-    {% for v in chip.values[:8] %}
+    {# chip is a plain dict, so chip.values would resolve to the dict's
+       .values method rather than the key - subscript it explicitly. #}
+    {% for v in chip['values'][:8] %}
     <tr><td>GW{{ v.gameweek }}</td><td>+{{ v.expected_gain }}</td><td>{{ v.method }}</td>
         <td class="muted">{{ v.notes }}{% if v.double_teams %} DGW: {{ v.double_teams|join(', ') }}{% endif %}</td></tr>
     {% endfor %}
