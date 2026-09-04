@@ -124,3 +124,12 @@ venv.bak/
 
 # Claude Code local state (worktrees, etc.)
 .claude/
+
+# AIrsenal automation runtime state (apollol): auto-apply alerts, run logs and
+# the once-per-gameweek marker. These live inside the checkout, and untracked
+# files there block `git merge --ff-only` on deploy.
+apply_alerts/
+apply_run_logs/
+weekly_run_logs/
+price_change_logs/
+.last_auto_applied_gw_*
