@@ -8,6 +8,8 @@ https://fpl.readthedocs.io/en/latest/_modules/fpl/models/user.html#User.transfer
 """
 
 import argparse
+import sys
+import warnings
 
 from prettytable import PrettyTable
 
@@ -32,6 +34,19 @@ TODO:
 
 
 def check_proceed(num_transfers: int = 0) -> bool:
+    if not sys.stdin.isatty():
+        # Nobody can answer a prompt in an unattended context (e.g. cron), and
+        # input() there raises EOFError rather than blocking. Refuse instead:
+        # applying transfers is irreversible, so "no confirmation available"
+        # must mean "don't apply". Callers that genuinely intend to apply
+        # unattended pass skip_check=True, which bypasses this entirely.
+        warnings.warn(
+            "Not applying transfers: running non-interactively, so there is no "
+            "way to confirm. Pass skip_check=True (--confirm on the CLI) to "
+            "apply without prompting.",
+            stacklevel=2,
+        )
+        return False
     proceed = input("Apply Transfers? There is no turning back! (yes/no)")
     if proceed != "yes":
         return False

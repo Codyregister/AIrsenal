@@ -4,6 +4,8 @@ Script to apply recommended squad changes after transfers are made
 """
 
 import argparse
+import sys
+import warnings
 
 from airsenal.framework.data_fetcher import FPLDataFetcher
 from airsenal.framework.squad import Squad
@@ -17,6 +19,14 @@ from airsenal.framework.utils import (
 
 def check_proceed(squad: Squad) -> bool:
     print(squad)
+    if not sys.stdin.isatty():
+        # See the equivalent guard in make_transfers.check_proceed.
+        warnings.warn(
+            "Not changing lineup: running non-interactively, so there is no "
+            "way to confirm. Pass skip_check=True to apply without prompting.",
+            stacklevel=2,
+        )
+        return False
     proceed = input("Apply changes to lineup? (yes/no) ")
     if proceed == "yes":
         print("Applying Changes...")
